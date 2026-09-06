@@ -1,0 +1,47 @@
+\documentclass[border=2pt]{standalone}
+\usepackage{tikz}
+\usetikzlibrary{arrows,positioning,calc}
+\usepackage{amsmath,amssymb}
+\begin{document}
+\begin{tikzpicture}[>=latex, font=\sffamily\small]
+
+      % Define styles
+      \tikzstyle{block} = [draw=blue!70!black, fill=blue!5, thick, rounded corners, minimum width=3.2cm, minimum height=1.2cm, align=center]
+      \tikzstyle{sensor} = [draw=green!60!black, fill=green!5, thick, rounded corners, minimum width=2.8cm, minimum height=3.5cm, align=center]
+      \tikzstyle{channel} = [draw=red!70!black, fill=red!5, thick, rounded corners, minimum width=2.8cm, minimum height=1.5cm, align=center]
+
+      % Nodes
+      \node[sensor] (sensors) at (0, 0) {\textbf{Greenhouse}\\\textbf{Sensor Field}\\ \\$N$ Sensors\\(Temperature)};
+
+      \node[block] (kalman) at (6, 2.5) {\textbf{1. Pre-transmission}\\\textbf{Sensing}\\(Kalman Filter)};
+      \node[block] (budget) at (6, 0) {\textbf{2. Dynamic}\\\textbf{Budgeting}\\(RABS-PD)};
+      \node[block] (polling) at (6, -2.5) {\textbf{3. Risk-Aware}\\\textbf{Polling}\\(Top-$B_t$ Selection)};
+
+      \node[channel] (env) at (13.5, 0) {\textbf{4. Wireless}\\\textbf{Channel}\\(Gilbert-Elliott\\Burst Loss)};
+
+      % Gateway Boundary
+      \draw[blue!70!black, thick, dashed, fill=blue!2, fill opacity=0.3] (3.8, 4.0) rectangle (8.2, -4.0);
+      \node[text=blue!70!black, font=\sffamily\bfseries\large] at (6, 3.6) {IoT Gateway};
+
+      % Arrows and routing
+      \draw[->, thick] (kalman) -- (budget) node[midway, right] {Risk Score $R_{t^-}$};
+      \draw[->, thick] (budget) -- (polling) node[midway, right] {Budget $B_t$};
+
+      % From sensors to Gateway (Historical Data)
+      \draw[->, thick, dashed, green!50!black] (sensors.north) |- (kalman.west) node[pos=0.75, above=0.15cm, text=black] {Historical Data $\hat{x}_{i,t^-}$};
+
+      % From Gateway to Sensors (Polling)
+      \draw[thick, blue!70!black] (polling.west) -- (0, -2.5) node[midway, below=0.15cm, text=black, align=center] {Polling Grants\\(Schedule)};
+      \draw[->, thick, blue!70!black] (0, -2.5) -- (sensors.south);
+
+      % From Sensors to Channel (Transmission) -- routed well clear of the gateway box
+      \draw[->, thick] (sensors.east) -- (2.0, 0) -- (2.0, -5.1) -- (13.5, -5.1) -- (env.south);
+      \node[text=black, fill=white, inner sep=2pt] at (8.6, -5.1) {Data Transmissions};
+
+      % From Channel to Gateway (Feedback)
+      \draw[->, thick, red!70!black] (env.north) |- (kalman.east) node[pos=0.75, above=0.15cm, text=black] {Successful Updates};
+
+      \draw[->, thick, red!70!black] (env.west) -- (budget.east) node[midway, below=0.15cm, text=black, align=center] {Dual-Penalty\\Feedback ($\lambda_t^B,\lambda_t^A,\lambda_t^M$)};
+
+    \end{tikzpicture}
+\end{document}

@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+.venv/
+fixtures/_build/
+*.aux
+*.log
+*.out
