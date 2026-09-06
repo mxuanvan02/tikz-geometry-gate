@@ -569,5 +569,178 @@ class TestCliScaleFlag(unittest.TestCase):
         r = self._run(str(self.pdf), "--json", "--scale", "0")
         self.assertEqual(r.returncode, 2)
 
+class TestG7EdgeEdgeOverlap(unittest.TestCase):
+    """G7: hai mui ten chay trung/song song sat nhau -> khong doc duoc duong.
+
+    Phan biet ro voi CAT NHAU: cat vuong goc la binh thuong trong so do,
+    chi bao loi khi hai duong chay SONG SONG va SAT nhau tren mot doan dai.
+    """
+
+    def test_identical_edges_is_error(self):
+        """Hai mui ten trung khit hoan toan."""
+        e1 = mk_edge([(60, 18), (168, 18)])
+        e2 = mk_edge([(60, 18), (168, 18)])
+        out = G.check_edge_edge([e1, e2])
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0].code, "G7/edge-edge-overlap")
+        self.assertGreater(out[0].evidence["overlapLengthPt"], 100)
+
+    def test_parallel_1pt_apart_is_error(self):
+        """Song song cach 1pt: nguoi doc thay mot duong day, khong phan biet duoc."""
+        e1 = mk_edge([(60, 89), (168, 89)])
+        e2 = mk_edge([(60, 88), (168, 88)])
+        out = G.check_edge_edge([e1, e2])
+        self.assertEqual(len(out), 1)
+
+    def test_perpendicular_crossing_is_ok(self):
+        """REGRESSION: cat vuong goc la BINH THUONG, khong duoc bao loi."""
+        e1 = mk_edge([(60, 100), (168, 100)])
+        e2 = mk_edge([(114, 60), (114, 140)])
+        out = G.check_edge_edge([e1, e2])
+        self.assertEqual(out, [], "cat vuong goc khong phai loi bo cuc")
+
+    def test_parallel_far_apart_is_ok(self):
+        """Song song nhung cach xa -> hai duong phan biet duoc, hop le."""
+        e1 = mk_edge([(60, 100), (168, 100)])
+        e2 = mk_edge([(60, 120), (168, 120)])
+        out = G.check_edge_edge([e1, e2])
+        self.assertEqual(out, [])
+
+    def test_short_touch_below_threshold_is_ok(self):
+        """Cham nhau doan rat ngan (goc re) -> khong phai loi."""
+        e1 = mk_edge([(100, 100), (110, 100)])
+        e2 = mk_edge([(100, 100), (104, 100)])
+        out = G.check_edge_edge([e1, e2])
+        self.assertEqual(out, [])
+
+    def test_dashed_over_solid_is_ok(self):
+        """Duong net dut ve tren duong lien la thu phap co y, khong bao loi."""
+        e1 = mk_edge([(60, 100), (168, 100)])
+        e2 = mk_edge([(60, 100), (168, 100)])
+        e2.dashed = True
+        out = G.check_edge_edge([e1, e2])
+        self.assertEqual(out, [])
+
+
+class TestG7RealFixture(unittest.TestCase):
+    """G7 tren PDF that: bat 2 ca chong, bo qua ca cat vuong goc."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.pdf = build_fixture("edge-overlap.tex")
+
+    def test_catches_two_overlaps_not_the_crossing(self):
+        findings, inv, _ = G.analyze(str(self.pdf))
+        g7 = [f for f in findings if f.code == "G7/edge-edge-overlap"]
+        self.assertEqual(len(g7), 2,
+                         "phai bat dung 2 ca chong, khong bat ca cat vuong goc")
+        for f in g7:
+            self.assertGreater(f.evidence["overlapLengthPt"], 50)
+
+
+class TestRuleEdgeFiltering(unittest.TestCase):
+    """REGRESSION: gach typography cua LaTeX khong phai duong so do.
+
+    Do bang so that tren ban thao: tieuluan p15 co 9 'edge' nhung 0 block,
+    0 arrowhead — do la 2 khung chu nhat cua bieu do + gach truc. Gate bao 16
+    loi G6 vi cac so lieu 1.10/0.58/... nam tren khung. VietLegalShift p4 co 4
+    'edge' ngang la gach PHAN SO cua cong thuc toan.
+
+    Dau hieu phan biet: duong so do co arrowhead SAT dau mut; gach typography
+    khong co.
+    """
+
+    def test_page_without_blocks_or_heads_has_all_edges_as_rules(self):
+        """Trang khong block, khong arrowhead -> moi edge la gach ke."""
+        edges = [mk_edge([(130, 225), (130, 573)]),
+                 mk_edge([(130, 573), (312, 573)])]
+        out = G.rule_edge_indices(edges, blocks=[], heads=[])
+        self.assertEqual(out, {0, 1}, "khong co so do thi khong co mui ten nao")
+
+    def test_edge_with_attached_arrowhead_is_not_a_rule(self):
+        """Mui ten that: arrowhead nam sat dau mut -> KHONG bi loc."""
+        edges = [mk_edge([(216, 68), (216, 96)])]
+        head = G.Elem("arrowhead", (214, 92, 218, 97),
+                      box(214, 92, 218, 97))
+        out = G.rule_edge_indices(edges, blocks=[], heads=[head])
+        self.assertNotIn(0, out, "edge co arrowhead sat dau mut la mui ten that")
+
+    def test_diagram_edge_without_head_survives_when_blocks_exist(self):
+        """Hinh co block: duong khong dau mui ten van duoc kiem (khong loc oan).
+
+        Trong arch_diagram co duong noi khong ve arrowhead o mot dau; day la
+        duong so do that, khong duoc coi la gach ke.
+        """
+        edges = [mk_edge([(46, 191), (170, 191)])]
+        blk = mk_block(40, 100, 200, 180)
+        head = G.Elem("arrowhead", (44, 187, 48, 192), box(44, 187, 48, 192))
+        out = G.rule_edge_indices(edges, blocks=[blk], heads=[head])
+        self.assertNotIn(0, out)
+
+    def test_g6_skips_ignored_edges(self):
+        """G6 phai bo qua edge nam trong ignore_edges."""
+        sp = mk_span("1.10", 475.5, 267.0, 486.0, 271.7)
+        edge = mk_edge([(464.7, 268.7), (477.7, 268.7)])
+        without = G.check_label_edge([sp], [edge], [])
+        self.assertEqual(len(without), 1, "khong loc thi bao loi")
+        withfilter = G.check_label_edge([sp], [edge], [],
+                                        ignore_edges={0})
+        self.assertEqual(withfilter, [], "loc roi thi khong bao")
+
+
+class TestGateAfterBuildHook(unittest.TestCase):
+    """Hook latexmk: gate tu chay sau moi lan build.
+
+    Da chay THAT tren tieuluan.pdf 28 trang: exit 1, xuat p007.png + p015.png.
+    Test nay canh 5 hanh vi hop dong cua hook, khong phai chi syntax.
+    """
+
+    HOOK = REPO / "scripts" / "gate_after_build.py"
+
+    @classmethod
+    def setUpClass(cls):
+        if not cls.HOOK.exists():
+            raise unittest.SkipTest("thieu scripts/gate_after_build.py")
+        cls.bad = build_fixture("defect-rabs.tex")
+        cls.good = build_fixture("good-rabs.tex")
+
+    def _run(self, *args, env_extra=None):
+        env = dict(os.environ)
+        env["PYTHONPATH"] = str(REPO / "scripts")
+        if env_extra:
+            env.update(env_extra)
+        return subprocess.run([sys.executable, str(self.HOOK), *args],
+                              capture_output=True, text=True, env=env)
+
+    def test_dirty_pdf_exits_1(self):
+        r = self._run(str(self.bad))
+        self.assertEqual(r.returncode, 1, f"co loi -> exit 1\n{r.stdout}{r.stderr}")
+
+    def test_clean_pdf_exits_0(self):
+        r = self._run(str(self.good))
+        self.assertEqual(r.returncode, 0, f"sach -> exit 0\n{r.stdout}{r.stderr}")
+
+    def test_missing_pdf_exits_2(self):
+        r = self._run("/tmp/khong-ton-tai-bao-gio.pdf")
+        self.assertEqual(r.returncode, 2)
+
+    def test_gate_soft_does_not_block_build(self):
+        """GATE_SOFT=1: van bao loi nhung KHONG chan build (exit 0)."""
+        r = self._run(str(self.bad), env_extra={"GATE_SOFT": "1"})
+        self.assertEqual(r.returncode, 0, "GATE_SOFT=1 phai exit 0")
+        self.assertIn("loi", r.stdout.lower())
+
+    def test_annotates_failing_page(self):
+        """Trang loi phai duoc xuat PNG khoanh do."""
+        outdir = Path(str(self.bad) + ".gate")
+        if outdir.exists():
+            for p in outdir.glob("*.png"):
+                p.unlink()
+        self._run(str(self.bad))
+        pngs = sorted(outdir.glob("*.png")) if outdir.exists() else []
+        self.assertTrue(pngs, "phai xuat PNG cho trang loi")
+        self.assertGreater(pngs[0].stat().st_size, 1000)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

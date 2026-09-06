@@ -1,0 +1,17 @@
+# .latexmkrc mau — bat cong duyet hinh hoc sau moi lan build.
+#
+# Copy vao thu muc du an (canh main.tex), sua GATE_HOOK cho dung may.
+# Khi build xong, latexmk se goi gate; gate exit != 0 se lam latexmk bao loi.
+#
+# Chi canh bao ma khong chan build: dat GATE_SOFT=1 truoc khi chay latexmk.
+#   GATE_SOFT=1 latexmk -pdf main.tex
+
+$pdf_mode = 1;
+
+my $GATE_HOOK = "$ENV{HOME}/.hermes/skills/tikz-geometry-gate/scripts/gate_after_build.py";
+
+# %D = ten file PDF vua tao. Chi chay hook khi file hook that su ton tai,
+# de .latexmkrc nay khong lam build vo tren may chua cai skill.
+if (-e $GATE_HOOK) {
+    $success_cmd = "python3 \"$GATE_HOOK\" %D";
+}

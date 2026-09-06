@@ -81,6 +81,32 @@ SUBSCRIPT_MAX_CHARS = 4  # sub/superscript hop le toi da may ky tu
 SCRIPT_SIZE_RATIO = 0.85  # span nho <= 85% span goc -> coi la sub/superscript
 SUBSCRIPT_FLOOR_RATIO = 0.55  # sub nho hon 55% body font -> teo that, bao loi
 MASK_COVER_RATIO = 0.75  # mask che >=75% dien tich nhan -> coi la co mask
+FIGURE_PAD = 6.0         # noi rong vung hinh (pt) de bat nhan sat vien hinh
+# Dau cau don le: kerning lam bbox cham chu lien truoc (vi du 'REVIEW' + '.').
+# Do la typography binh thuong, khong phai nhan chong nhan.
+PUNCT_ONLY = set(".,;:!?)(][}{'\"`\u2019\u2018\u201c\u201d-\u2013\u2014")
+
+# G7: mui ten chong mui ten. Hai duong CHAY SONG SONG va gan nhau thi nguoi doc
+# khong phan biet duoc dau la duong nao. Cat nhau vuong goc thi BINH THUONG
+# trong so do (khong phai loi), nen chi bao khi doan trung nhau du dai.
+EDGE_OVERLAP_TOL = 1.5      # hai duong cach nhau <= 1.5pt => coi nhu trung
+EDGE_OVERLAP_MIN_LEN = 8.0  # doan trung nhau >= 8pt moi bao loi
+EDGE_PARALLEL_DEG = 12.0    # goc lech <= 12 do => coi la song song
+
+# Phan biet DUONG SO DO voi GACH TYPOGRAPHY cua LaTeX.
+# BAY DA DO BANG SO THAT (quet ban thao VietLegalShift + tieuluan):
+#   - main p4: 0 block, 0 dau mui ten, 4 "edge" ngang thuan -> that ra la
+#     \hrule dau trang va 3 gach phan so \frac. Gate bao 2 loi G6 vi chu
+#     nam tren gach phan so.
+#   - tieuluan p15: 0 block, 8 "edge" tao thanh 2 hinh chu nhat khep kin
+#     -> khung truc bieu do. Gate bao 16 loi G6 vi so lieu 1.10/0.58/...
+#     nam tren khung.
+#   - arch_diagram (hinh THAT): 5 block va 6/8 edge co dau mui ten SAT dau mut.
+# => Dau hieu phan biet: duong so do co arrowhead gan dau mut; gach typography
+#    thi khong, va thuong la mot doan thang truc chuan hoac khung chu nhat.
+ARROW_ATTACH_EPS = 4.0   # arrowhead cach dau mut <= 4pt => thuoc mui ten do
+RULE_ANGLE_TOL = 1.0     # lech <= 1 do => truc ngang/doc chuan (gach ke)
+RECT_JOIN_TOL = 1.5      # hai dau mut cach <= 1.5pt => coi nhu noi nhau
 
 # Kich thuoc trang tai lieu quen biet (pt, sai so +-3pt). Neu trang PDF khop
 # mot trong nhung kich thuoc nay thi font do duoc LA font that ma nguoi doc
@@ -550,10 +576,58 @@ def check_edge_through_block(edges, blocks, eps=ENDPOINT_EPS,
     return out
 
 
-def check_label_block(spans, blocks):
+def figure_regions(blocks, boundaries, edges, pad=FIGURE_PAD):
+    """Vung anh huong cua hinh ve = hop cac bbox drawing, noi rong `pad`.
+
+    BAY DA GAP (quet that tren ban thao): chay gate len TRANG TAI LIEU day du
+    thi G2/G3/G6 no tren CHU THUONG cua bai viet — 'REVIEW' cham dau '.',
+    'ngay' cham dau ',' — vi kerning lam bbox hai span cham nhau. Trang chu
+    thuan (0 block, 0 edge, 414 nhan) bao 1 loi la VO NGHIA: khong co hinh nao
+    o do ca.
+
+    Day la gate cho HINH, khong phai linter typography. Nen chi xet nhan nam
+    trong/gan vung co drawing. Trang khong co drawing -> khong co vung -> bo
+    qua het G2/G3/G6.
+    """
+    geoms = [e.geom for e in list(blocks) + list(boundaries) + list(edges)
+             if e.geom is not None]
+    if not geoms:
+        return None
+    return unary_union([g.buffer(pad) for g in geoms])
+
+
+# Sentinel: "khong ap dung loc vung hinh" (hinh standalone). Phai phan biet
+# ro voi None = "trang co xet loc NHUNG khong tim thay drawing nao".
+NO_FILTER = "no-filter"
+
+
+def in_figure(span, regions):
+    """True khi nhan thuoc pham vi hinh can kiem.
+
+    BAY DA GAP (do bang so that tren ban thao VietLegalShift): docstring cu noi
+    "regions is None -> khong loc" nhung None lai chinh la gia tri figure_regions
+    tra ve khi trang KHONG CO drawing nao. Ket qua: dung luc can bo qua het
+    (trang chu thuan, 0 block 0 edge) thi gate lai xet het 414 nhan va bao loi
+    tren chu than bai. Ba trang thai phai tach roi:
+
+      regions is NO_FILTER -> hinh standalone, kiem toan bo span
+      regions is None      -> trang tai lieu KHONG co drawing -> khong co hinh
+                              nao de kiem -> bo qua het
+      regions la geometry  -> trang tai lieu co hinh -> chi kiem span trong vung
+    """
+    if regions is NO_FILTER:
+        return True
+    if regions is None:
+        return False
+    return regions.intersects(span["geom"])
+
+
+def check_label_block(spans, blocks, regions=NO_FILTER):
     """G2: nhan chong vien block (mot phan trong, mot phan ngoai)."""
     out = []
     for si, sp in enumerate(spans):
+        if not in_figure(sp, regions):
+            continue
         for bi, b in enumerate(blocks):
             g = sp["geom"]
             if not g.intersects(b.geom):
@@ -616,12 +690,26 @@ def _is_script_pair(a: dict, b: dict) -> bool:
     return gap <= 2.0
 
 
-def check_label_label(spans):
-    """G3: hai nhan chong nhau."""
+def _is_punct_pair(ta: str, tb: str) -> bool:
+    """Mot ben chi la dau cau -> kerning cham nhau, khong phai loi."""
+    for s in (ta.strip(), tb.strip()):
+        if s and all(c in PUNCT_ONLY for c in s):
+            return True
+    return False
+
+
+def check_label_label(spans, regions=NO_FILTER):
+    """G3: hai nhan chong nhau (chi trong vung hinh)."""
     out = []
     for i in range(len(spans)):
+        if not in_figure(spans[i], regions):
+            continue
         for j in range(i + 1, len(spans)):
             a, b = spans[i], spans[j]
+            if not in_figure(b, regions):
+                continue
+            if _is_punct_pair(a["text"], b["text"]):
+                continue
             if not a["geom"].intersects(b["geom"]):
                 continue
             inter = a["geom"].intersection(b["geom"]).area
@@ -674,6 +762,116 @@ def check_bounds(page, elems, spans, margin=0.0):
                  "outsideAreaPt2": _r(outside)},
                 ["giam kich thuoc hinh", "tang le trang",
                  "dat lai vi tri phan tu"]))
+    return out
+
+
+def _seg_angle_deg(p0, p1):
+    """Goc cua doan thang so voi truc x, chuan hoa vao [0, 180)."""
+    dx, dy = p1[0] - p0[0], p1[1] - p0[1]
+    if abs(dx) < 1e-9 and abs(dy) < 1e-9:
+        return None
+    ang = math.degrees(math.atan2(dy, dx)) % 180.0
+    return ang
+
+
+def _angles_parallel(a, b, tol=EDGE_PARALLEL_DEG):
+    """Hai goc co song song trong sai so tol (tinh ca vong 180 do)."""
+    if a is None or b is None:
+        return False
+    d = abs(a - b) % 180.0
+    return min(d, 180.0 - d) <= tol
+
+
+def _segments(poly):
+    """Tach polyline thanh cac doan thang lien tiep."""
+    out = []
+    for i in range(len(poly) - 1):
+        p0, p1 = poly[i], poly[i + 1]
+        if abs(p0[0] - p1[0]) < 1e-9 and abs(p0[1] - p1[1]) < 1e-9:
+            continue
+        out.append((p0, p1))
+    return out
+
+
+def check_edge_edge(edges, tol=EDGE_OVERLAP_TOL, min_len=EDGE_OVERLAP_MIN_LEN,
+                    ignore_edges=frozenset()):
+    """G7: hai mui ten chay TRUNG/SONG SONG SAT NHAU tren doan du dai.
+
+    Vi sao khong bao moi cho hai duong giao nhau: trong so do, hai duong CAT
+    NHAU vuong goc la binh thuong va nguoi doc van doc duoc. Loi that la khi
+    hai duong DI TRUNG nhau mot doan — luc do khong biet duong nao di dau, va
+    mui ten thu hai bi che hoan toan.
+
+    Thuat toan: voi tung cap doan thang cua hai edge khac nhau, chi xet khi
+    hai doan gan SONG SONG (lech goc <= EDGE_PARALLEL_DEG). Noi rong mot doan
+    ra `tol` roi lay giao voi doan kia; neu chieu dai phan giao >= min_len thi
+    bao loi.
+    """
+    out = []
+    reported = set()
+    for i in range(len(edges)):
+        for j in range(i + 1, len(edges)):
+            if i in ignore_edges or j in ignore_edges:
+                continue
+            ea, eb = edges[i], edges[j]
+            if not ea.poly or not eb.poly:
+                continue
+            # BAY: mot duong NET DUT ve tren mot duong NET LIEN la thu phap co
+            # y (vi du luong du lieu phu chay cung tuyen voi luong chinh).
+            # Nguoi doc phan biet duoc bang kieu net, nen KHONG bao loi.
+            # Chi bao khi hai duong CUNG kieu net -> that su khong doc duoc.
+            if bool(ea.dashed) != bool(eb.dashed):
+                continue
+            # loc nhanh bang bbox truoc khi tinh hinh hoc
+            ax0, ay0, ax1, ay1 = ea.bbox
+            bx0, by0, bx1, by1 = eb.bbox
+            if (ax1 + tol < bx0 or bx1 + tol < ax0
+                    or ay1 + tol < by0 or by1 + tol < ay0):
+                continue
+            best = None
+            for sa in _segments(ea.poly):
+                anga = _seg_angle_deg(*sa)
+                for sb in _segments(eb.poly):
+                    angb = _seg_angle_deg(*sb)
+                    if not _angles_parallel(anga, angb):
+                        continue
+                    try:
+                        la = LineString(sa)
+                        lb = LineString(sb)
+                    except Exception:
+                        continue
+                    inter = la.buffer(tol, cap_style=2).intersection(lb)
+                    length = getattr(inter, "length", 0.0) or 0.0
+                    if length < min_len:
+                        continue
+                    if best is None or length > best[0]:
+                        mid = inter.interpolate(0.5, normalized=True)
+                        best = (length, sa, sb, (_r(mid.x), _r(mid.y)))
+            if best is None:
+                continue
+            key = (i, j)
+            if key in reported:
+                continue
+            reported.add(key)
+            length, sa, sb, mid = best
+            out.append(Finding(
+                "G7/edge-edge-overlap", "error",
+                f"mui ten #{i} va #{j} chay trung nhau {length:.1f}pt "
+                f"(song song, cach nhau <= {tol:g}pt) — khong doc duoc "
+                f"duong nao di dau",
+                {"edgeA": i, "edgeB": j,
+                 "segmentA": [list(sa[0]), list(sa[1])],
+                 "segmentB": [list(sb[0]), list(sb[1])],
+                 "overlapLengthPt": _r(length),
+                 "tolerancePt": tol,
+                 "midPoint": list(mid),
+                 "bbox": [min(sa[0][0], sa[1][0], sb[0][0], sb[1][0]),
+                          min(sa[0][1], sa[1][1], sb[0][1], sb[1][1]),
+                          max(sa[0][0], sa[1][0], sb[0][0], sb[1][0]),
+                          max(sa[0][1], sa[1][1], sb[0][1], sb[1][1])]},
+                ["tach hai duong ra bang via/channel khac nhau",
+                 "dung bend left/bend right cho mot trong hai duong",
+                 "gop hai quan he thanh mot duong neu chung nghia"]))
     return out
 
 
@@ -755,7 +953,91 @@ def check_tiny_text(spans, min_font=MIN_FONT, base_font=None,
     return out
 
 
-def check_label_edge(spans, edges, masks, min_area=EDGE_CLASH_MIN):
+def _has_attached_head(edge, heads, eps=ARROW_ATTACH_EPS):
+    """True khi co dau mui ten nam sat MOT TRONG HAI dau mut cua edge."""
+    if not heads or edge.geom is None:
+        return False
+    try:
+        coords = list(edge.geom.coords)
+    except Exception:
+        return False
+    if len(coords) < 2:
+        return False
+    p0, p1 = Point(coords[0]), Point(coords[-1])
+    for h in heads:
+        if h.geom is None:
+            continue
+        if min(p0.distance(h.geom), p1.distance(h.geom)) <= eps:
+            return True
+    return False
+
+
+def _is_axis_single(edge, tol=RULE_ANGLE_TOL):
+    """True khi edge la MOT doan thang theo truc ngang/doc chuan."""
+    segs = _segments(edge.poly)
+    if len(segs) != 1:
+        return False
+    a = abs(_seg_angle_deg(*segs[0])) % 180.0
+    return a <= tol or abs(a - 90.0) <= tol or abs(a - 180.0) <= tol
+
+
+def _endpoints(edge):
+    c = list(edge.geom.coords)
+    return c[0], c[-1]
+
+
+def _shares_corner(a, b, tol=RECT_JOIN_TOL):
+    for pa in _endpoints(a):
+        for pb in _endpoints(b):
+            if math.hypot(pa[0] - pb[0], pa[1] - pb[1]) <= tol:
+                return True
+    return False
+
+
+def _in_rect_frame(idx, edges, candidates):
+    """True khi edge idx la mot canh cua khung chu nhat khep kin.
+
+    Khung truc bieu do / ke bang gom 4 doan thang truc chuan noi dau-duoi
+    nhau. Doi hoi it nhat 2 canh khac cung nhom chia dau mut voi no va bbox
+    hop lai la hinh chu nhat bao tron ca 4.
+    """
+    e = edges[idx]
+    touch = [j for j in candidates
+             if j != idx and _shares_corner(e, edges[j])]
+    if len(touch) < 2:
+        return False
+    # can it nhat mot canh doi dien: song song, khong chia dau mut, cung
+    # nam trong bbox chung
+    segs = _segments(e.poly)
+    ang = abs(_seg_angle_deg(*segs[0])) % 180.0
+    for j in candidates:
+        if j == idx or j in touch:
+            continue
+        aj = abs(_seg_angle_deg(*_segments(edges[j].poly)[0])) % 180.0
+        if abs(aj - ang) <= RULE_ANGLE_TOL and any(
+                _shares_corner(edges[j], edges[k]) for k in touch):
+            return True
+    return False
+
+
+def rule_edge_indices(edges, blocks, heads):
+    """Index cac edge la GACH TYPOGRAPHY, khong phai duong so do.
+
+    Tra ve set index de G6/G7 bo qua. Khong dung cho G1 (G1 can block, ma
+    trang khong co so do thi cung khong co block).
+    """
+    attached = {i for i, e in enumerate(edges)
+                if _has_attached_head(e, heads)}
+    if not blocks and not attached:
+        # Trang khong co block va khong co mui ten nao -> khong co so do.
+        return set(range(len(edges)))
+    candidates = [i for i, e in enumerate(edges)
+                  if i not in attached and _is_axis_single(e)]
+    return {i for i in candidates if _in_rect_frame(i, edges, candidates)}
+
+
+def check_label_edge(spans, edges, masks, min_area=EDGE_CLASH_MIN,
+                     regions=NO_FILTER, ignore_edges=frozenset()):
     """G6: nhan de len than mui ten ma khong co mask trang HIEU LUC.
 
     THU TU VE LA QUYET DINH. Mask trang chi che duoc duong khi no duoc ve SAU
@@ -770,7 +1052,14 @@ def check_label_edge(spans, edges, masks, min_area=EDGE_CLASH_MIN):
         g = sp["geom"]
         if g.area <= 0:
             continue
+        # Chi xet nhan NAM TRONG vung hinh. Tren trang ban thao da build, chu
+        # than bai chay qua duong ke bang/rule cua LaTeX se sinh false positive
+        # hang loat (do bang 16 loi tren 1 trang bieu do).
+        if regions and not in_figure(sp, regions):
+            continue
         for ei, e in enumerate(edges):
+            if ei in ignore_edges:
+                continue
             if not g.intersects(e.geom):
                 continue
             inter = g.intersection(e.geom)
@@ -867,21 +1156,35 @@ def analyze(pdf_path, page_no=0, min_font=MIN_FONT, eps=ENDPOINT_EPS,
     pr = page_holder.rect
     kind, preset = page_kind(pr.width, pr.height)
 
+    # Vung hinh: chi xet G2/G3/G6 o day. Tren trang ban thao day du, chu than
+    # bai va duong ke bang cua LaTeX se sinh false positive hang loat neu khong
+    # gioi han pham vi (do that: 1 loi tren trang chu thuan 0 block 0 edge).
+    # Loc theo vung hinh CHI tren trang tai lieu day du. Tren hinh standalone
+    # (crop sat noi dung) thi CA TRANG la hinh: mot nhan troi trong hinh nhung
+    # khong sat drawing nao van thuoc ve hinh do. Loc o day se sinh FALSE
+    # NEGATIVE (da bi test bat: G3 mat hoan toan tren fixture bad.pdf).
+    regions = (figure_regions(blocks, boundaries, edges)
+               if kind == "document" else NO_FILTER)
+
     findings = []
     findings += check_edge_through_block(edges, blocks, eps=eps)
-    findings += check_label_block(spans, blocks)
-    findings += check_label_label(spans)
+    findings += check_label_block(spans, blocks, regions=regions)
+    findings += check_label_label(spans, regions=regions)
     findings += check_bounds(page_holder, blocks + boundaries + edges, spans,
                              margin=margin)
     findings += check_tiny_text(spans, min_font=min_font, scale=scale,
                                 kind=kind, preset=preset,
                                 page_width=pr.width)
-    findings += check_label_edge(spans, edges, masks)
+    rule_edges = rule_edge_indices(edges, blocks, heads)
+    findings += check_label_edge(spans, edges, masks, regions=regions,
+                                 ignore_edges=rule_edges)
+    findings += check_edge_edge(edges, ignore_edges=rule_edges)
 
     inventory = {
         "blocks": len(blocks), "boundaries": len(boundaries),
         "edges": len(edges), "arrowheads": len(heads),
         "masks": len(masks), "labels": len(spans),
+        "ruleEdges": len(rule_edges), "diagramEdges": len(edges) - len(rule_edges),
         "pageWidthPt": _r(pr.width), "pageHeightPt": _r(pr.height),
         "pageKind": kind, "pagePreset": preset, "scale": scale,
         "minFontPt": _r(min(([s["size"] for s in spans] or [0])), 2),

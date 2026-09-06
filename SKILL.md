@@ -51,6 +51,7 @@ Gate tự nhận khổ trang: `pageKind=document` (khớp A4/letter/beamer → f
 | `G4/out-of-bounds` | phần tử tràn khỏi trang |
 | `G5/tiny-text` | chữ nhỏ hơn sàn (bắt được chữ teo do `\resizebox`) |
 | `G6/label-edge-clash` | nhãn bị đường đi xuyên qua, không có mask che |
+| `G7/edge-edge-overlap` | hai mũi tên chạy trùng/song song sát nhau trên đoạn dài |
 
 ## Nguyên lý G1 (quan trọng nhất)
 
@@ -136,6 +137,48 @@ Nếu hình có node lồng nhau phức tạp và G1 báo quá nhiều dương t
 ```
 
 Cần 2 lượt compile. Chỉ làm khi heuristic thất bại — đừng làm ngay từ đầu.
+
+## Gate tự động sau mỗi lần build (latexmk)
+
+```bash
+# chay tay tren PDF nhieu trang
+python scripts/gate_after_build.py duong-dan.pdf
+
+# bien moi truong
+GATE_SOFT=1   # co loi van exit 0 (canh bao, khong chan build)
+GATE_ARGS="--min-font 7 --scale 0.46"   # truyen tham so cho gate
+```
+
+Cắm vào `latexmk`: copy `templates/latexmkrc.example` thành `.latexmkrc` trong
+thư mục dự án. Hook quét **mọi trang**, xuất PNG khoanh đỏ vào
+`<ten>.pdf.gate/pNNN.png`, exit `1` khi có lỗi (trừ `GATE_SOFT=1`), exit `2` khi
+thiếu file.
+
+## Bẫy đã gặp — phần chạy trên bản thảo thật
+
+**9. Gate là gate cho HÌNH, không phải linter typography.** Chạy trên trang bản
+thảo đầy đủ thì G2/G3/G6 nổ trên chữ thân bài: `'REVIEW'` chạm dấu `'.'`,
+`'ngày'` chạm `','` — do kerning làm bbox hai span chạm nhau. Trang chữ thuần
+(0 block, 0 edge, 414 nhãn) báo lỗi là vô nghĩa. Cách sửa: chỉ xét nhãn nằm
+trong vùng có drawing (`figure_regions`), và loại cặp có một bên chỉ là dấu câu.
+
+**10. Ba trạng thái của `regions`, không phải hai.** Docstring cũ nói
+`regions is None → không lọc`, nhưng `None` lại chính là giá trị
+`figure_regions` trả về khi trang KHÔNG có drawing. Kết quả: đúng lúc cần bỏ
+qua hết thì gate xét hết. Phải tách rõ: `NO_FILTER` = hình standalone, kiểm
+toàn bộ; `None` = trang tài liệu không có hình → bỏ qua; geometry = chỉ kiểm
+trong vùng.
+
+**11. Gạch phân số và khung biểu đồ của LaTeX bị nhận là mũi tên.** Trang có
+biểu đồ báo 16 lỗi G6 vì số liệu `1.10`, `0.58`… nằm trên khung; trang có công
+thức báo lỗi vì gạch phân số. Dấu hiệu phân biệt: **đường sơ đồ có arrowhead
+gắn sát đầu mút** (hình thật: 6/8 edge), gạch typography thì không và thường là
+một đoạn trục chuẩn hoặc khung chữ nhật. Xem `rule_edge_indices`.
+
+**12. Đồng bộ bản cài trước khi đo lại.** Sửa code ở clone rồi chạy script quét
+trỏ vào `~/.hermes/skills/...` sẽ đo lại chính code cũ — kết quả "y nguyên" là
+giả. So `sha256` clone vs bản cài trước khi tin số đo. `rsync --exclude` bảo vệ
+file khỏi `--delete`, nên `__pycache__` và `fixtures/_build` phải xoá tay.
 
 ## Test
 
