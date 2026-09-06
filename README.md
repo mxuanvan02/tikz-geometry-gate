@@ -100,7 +100,7 @@ cho hình vẫn lỗi — có test hồi quy canh đúng trường hợp này.
 python -m unittest discover -s test -t . -v
 ```
 
-33 test. Fixture PDF được dựng từ `.tex` nên chạy được trên máy sạch (cần `pdflatex` + tikz).
+37 test. Fixture PDF được dựng từ `.tex` nên chạy được trên máy sạch (cần `pdflatex` + tikz).
 
 ## Hạn chế
 

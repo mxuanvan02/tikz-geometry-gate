@@ -35,6 +35,8 @@ python scripts/tikz_gate.py figure.pdf --json --annotate loi.png
 
 Exit code: `0` pass, `1` có lỗi, `2` lỗi dùng tool.
 
+Biến môi trường: `TIKZGATE_PDF_BACKEND=pymupdf` để đổi backend.
+
 Tuỳ chọn: `--min-font 6` (sàn chữ, pt), `--eps 6` (bán kính bỏ qua quanh đầu mút), `--page 0`, `--strict` (coi warning là lỗi).
 
 ## Sáu nhóm check
@@ -97,6 +99,15 @@ Cách sửa hình đúng: tách nhãn thành `\node` riêng đặt ở **cuối*
 
 **6. `pdftotext` không dùng để kiểm chữ bị mất.** Nó tách chuỗi ở ranh giới text-run, `Chuẩn hóa` thành `Chuẩ` + `n hóa`. Kiểm trên SVG hoặc trên `rawdict` span.
 
+**7. Không sort char theo toạ độ khi gom span (backend pdfplumber).** `page.chars` đã
+theo thứ tự content stream. Sort lại theo `(top, x0)` sẽ trộn hai nhãn *chồng nhau*
+ở cùng dòng thành một span → G3 không còn gì để so → **false negative**.
+
+**8. Chặn char nhảy lùi khi gom span.** Điều kiện gộp phải là `0 <= gap <= ngưỡng`.
+Nếu chỉ viết `gap <= ngưỡng` thì char của nhãn thứ hai (x0 nhảy lùi, gap âm) vẫn thoả,
+hai nhãn chồng nhau bị gộp thành một span và lỗi biến mất. Đây là bug đã làm gate bỏ
+sót 5 lỗi G3 + 2 lỗi G6 trên fixture `bad.tex`.
+
 ## Khi heuristic G1 sai
 
 Nếu hình có node lồng nhau phức tạp và G1 báo quá nhiều dương tính giả, xuất ground truth từ TikZ thay vì đoán:
@@ -120,14 +131,27 @@ Cần 2 lượt compile. Chỉ làm khi heuristic thất bại — đừng làm 
 python -m unittest discover -s test -t . -v
 ```
 
-33 test, gồm test hồi quy cho bug thứ tự vẽ. Fixture PDF được dựng từ `.tex` trong `fixtures/` nên repo chạy được trên máy sạch (chỉ cần `pdflatex` + tikz).
+37 test, gồm test hồi quy cho bug thứ tự vẽ và test parity giữa hai backend. Fixture PDF được dựng từ `.tex` trong `fixtures/` nên repo chạy được trên máy sạch (chỉ cần `pdflatex` + tikz).
 
-## Phụ thuộc
+## Phụ thuộc và backend
 
 ```
-pymupdf>=1.24   # AGPL-3.0 — nếu public tool thì đổi sang pdfplumber (MIT)
+pdfplumber>=0.11   # MIT — backend mặc định
 shapely>=2.0
+pillow>=10.0       # tuỳ chọn, để --annotate chạy khi không có pymupdf
 ```
+
+Hai backend đọc PDF, **cùng kết quả** (có test parity canh):
+
+| Backend | License | Khi nào dùng |
+|---|---|---|
+| `pdfplumber` | MIT | **mặc định** — dùng được cho tool public |
+| `pymupdf` | AGPL-3.0 | nhanh hơn; bật bằng `TIKZGATE_PDF_BACKEND=pymupdf` |
+
+Cả hai đều phải cho **zorder** (thứ tự vẽ trong content stream). pdfplumber không có
+field zorder sẵn — phải lấy qua `page.layout` (giữ đúng thứ tự stream), **không** dùng
+`page.rects` / `page.lines` / `page.curves` vì các list đó tách theo loại, mất thứ tự
+tương đối giữa mask và edge. Mất zorder là mất luôn check G6 mask (xem bẫy 1).
 
 ## Kết hợp với tool khác
 

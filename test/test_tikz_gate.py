@@ -340,5 +340,110 @@ class TestCli(unittest.TestCase):
         out.unlink()
 
 
+class TestPdfPlumberSpanGrouping(unittest.TestCase):
+    """REGRESSION: hai bug gom char cua backend pdfplumber.
+
+    pdfplumber khong co khai niem 'span', phai gom char tay. Hai bug da gap:
+
+    Bug 1 (sort theo toa do): neu sort char theo (top, x0) truoc khi gom thi
+    hai nhan CHONG NHAU o cung dong bi tron lan roi gop thanh MOT span ->
+    G3/label-label-overlap khong con thay gi de so sanh (false negative).
+    page.chars von da theo thu tu content stream, khong duoc sort lai.
+
+    Bug 2 (nhay lui): dieu kien gop dung (x0 - cur_x1) <= nguong. Khi span moi
+    bat dau LUI ve ben trai (x0 - cur_x1 am, vi du -72pt cho nhan chong nhau),
+    bieu thuc van dung -> gop sai. Phai chan gap am.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        if G._active_backend() != "pdfplumber":
+            raise unittest.SkipTest("chi ap dung cho backend pdfplumber")
+        cls.pdf = build_fixture("bad.tex")
+
+    def test_overlapping_labels_stay_separate_spans(self):
+        import pdfplumber
+        with pdfplumber.open(str(self.pdf)) as pdf:
+            spans = G.text_spans(pdf.pages[0])
+        texts = [s["text"] for s in spans]
+        # fixture co 2 nhan 'Overlapping label one' / '... two' de chong nhau.
+        merged = [t for t in texts if t.count("Overlapping") > 1]
+        self.assertEqual(merged, [],
+                         f"khong duoc gop 2 nhan chong nhau thanh 1 span: {texts}")
+        self.assertGreaterEqual(len([t for t in texts if "Overlapping" in t]), 2,
+                                f"phai giu du 2 nhan rieng: {texts}")
+
+    def test_g3_still_detects_overlap_on_real_pdf(self):
+        findings, inv, _ = G.analyze(str(self.pdf))
+        codes = [f.code for f in findings]
+        self.assertIn("G3/label-label-overlap", codes,
+                      "gom span sai se lam G3 mat hoan toan (false negative)")
+
+
+class TestBackendParity(unittest.TestCase):
+    """Hai backend phai cho CUNG ket luan tren cung fixture.
+
+    Neu lech, tuc la mot backend bo sot loi. Test nay la canh cho moi thay doi
+    o classify_*/text_spans_* ve sau.
+    """
+
+    FIXTURES = ("good-rabs.tex", "defect-rabs.tex", "stale-mask-rabs.tex", "bad.tex")
+
+    def _run(self, tex, backend):
+        pdf = build_fixture(tex)
+        env = dict(os.environ)
+        env["TIKZGATE_PDF_BACKEND"] = backend
+        r = subprocess.run(
+            [sys.executable, str(REPO / "scripts" / "tikz_gate.py"),
+             str(pdf), "--json"],
+            capture_output=True, text=True, env=env)
+        if not r.stdout.strip():
+            raise unittest.SkipTest(f"backend {backend} khong chay duoc")
+        return json.loads(r.stdout)
+
+    def test_same_verdict_and_codes(self):
+        try:
+            import pdfplumber  # noqa: F401
+        except ImportError:
+            raise unittest.SkipTest("thieu pdfplumber")
+        if G.fitz is None:
+            raise unittest.SkipTest("thieu pymupdf, khong so sanh duoc")
+        from collections import Counter
+        for tex in self.FIXTURES:
+            with self.subTest(fixture=tex):
+                a = self._run(tex, "pymupdf")
+                b = self._run(tex, "pdfplumber")
+                self.assertEqual(a["ok"], b["ok"], f"{tex}: verdict lech")
+                ca = Counter(f["code"] for f in a["findings"])
+                cb = Counter(f["code"] for f in b["findings"])
+                self.assertEqual(ca, cb, f"{tex}: bo loi lech {ca} vs {cb}")
+
+
+class TestAnnotateWithoutPyMuPDF(unittest.TestCase):
+    """annotate() phai chay duoc khi CHI co pdfplumber (khong co PyMuPDF).
+
+    Neu khong, skill se buoc phai keo PyMuPDF (AGPL-3.0) vao chi de ve khung do.
+    """
+
+    def test_annotate_pdftocairo_path(self):
+        import shutil
+        if not shutil.which("pdftocairo"):
+            raise unittest.SkipTest("thieu pdftocairo")
+        try:
+            import PIL  # noqa: F401
+        except ImportError:
+            raise unittest.SkipTest("thieu Pillow")
+        pdf = build_fixture("defect-rabs.tex")
+        findings, _, _ = G.analyze(str(pdf))
+        self.assertGreater(len(findings), 0, "fixture phai co loi de khoanh")
+        out = FIXTURES / "_build" / "_test_annot_cairo.png"
+        if out.exists():
+            out.unlink()
+        G._annotate_pdftocairo(str(pdf), str(out), findings, 0, 3.0)
+        self.assertTrue(out.exists(), "phai ghi duoc PNG bang pdftocairo")
+        self.assertGreater(out.stat().st_size, 1000)
+        out.unlink()
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

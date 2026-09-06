@@ -1,2 +1,10 @@
-pymupdf>=1.24
+# Backend doc PDF mac dinh: pdfplumber (MIT) -> skill co the public tu do.
+pdfplumber>=0.11
 shapely>=2.0
+
+# Tuy chon: ve anh khoanh loi khi khong co pymupdf
+pillow>=10.0
+
+# Tuy chon, KHONG bat buoc: backend thay the, nhanh hon nhung AGPL-3.0.
+# Bat bang TIKZGATE_PDF_BACKEND=pymupdf
+# pymupdf>=1.24

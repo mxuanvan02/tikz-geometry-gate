@@ -22,16 +22,52 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import sys
 from dataclasses import dataclass, field, asdict
 
-try:
-    import pymupdf as fitz
-except ImportError:  # pragma: no cover
-    import fitz
+# Backend doc PDF. Mac dinh pdfplumber (MIT) de skill co the public;
+# PyMuPDF (AGPL-3.0) chi dung khi dat ARCHIFY_PDF_BACKEND=pymupdf hoac khi
+# thieu pdfplumber. Ca hai deu phai cho zorder (thu tu ve trong content
+# stream) — thieu zorder la mat check G6 mask.
+BACKEND = os.environ.get("TIKZGATE_PDF_BACKEND", "").strip().lower()
+
+fitz = None
+pdfplumber = None
+
+if BACKEND != "pymupdf":
+    try:
+        import pdfplumber  # type: ignore
+        BACKEND = "pdfplumber"
+    except ImportError:  # pragma: no cover
+        BACKEND = ""
+
+if BACKEND != "pdfplumber":
+    try:
+        import pymupdf as fitz  # type: ignore
+        BACKEND = "pymupdf"
+    except ImportError:  # pragma: no cover
+        try:
+            import fitz  # type: ignore
+            BACKEND = "pymupdf"
+        except ImportError:
+            raise SystemExit(
+                "can pdfplumber (khuyen dung, MIT) hoac pymupdf: "
+                "pip install pdfplumber shapely"
+            )
 
 from shapely.geometry import LineString, Point, Polygon, box
 from shapely.ops import unary_union
+
+
+def _active_backend() -> str:
+    """Ten backend dang dung: 'pdfplumber' hoac 'pymupdf'.
+
+    Tach thanh ham (khong doc BACKEND truc tiep) de test co the monkeypatch
+    va de _open_page / annotate cung dung mot nguon su that.
+    """
+    return BACKEND
+
 
 # ---- nguong mac dinh (pt) --------------------------------------------------
 ARROWHEAD_MAX = 12.0     # canh toi da cua tam giac dau mui ten
@@ -74,7 +110,7 @@ def _bbox_tuple(rect):
     return (_r(rect.x0), _r(rect.y0), _r(rect.x1), _r(rect.y1))
 
 
-def _flatten_items(items):
+def _flatten_items_pymupdf(items):
     """Tra ve danh sach polyline (list diem) tu drawing items."""
     lines = []
     cur = []
@@ -107,8 +143,9 @@ def _flatten_items(items):
     return lines
 
 
-def classify(page, block_min_area=BLOCK_MIN_AREA, arrowhead_max=ARROWHEAD_MAX):
-    """Phan loai drawing thanh block / boundary / edge / arrowhead / mask."""
+def classify_pymupdf(page, block_min_area=BLOCK_MIN_AREA,
+                     arrowhead_max=ARROWHEAD_MAX):
+    """Phan loai drawing (backend PyMuPDF)."""
     blocks, boundaries, edges, heads, masks = [], [], [], [], []
     for zi, d in enumerate(page.get_drawings()):
         r = d["rect"]
@@ -117,7 +154,7 @@ def classify(page, block_min_area=BLOCK_MIN_AREA, arrowhead_max=ARROWHEAD_MAX):
         dashes = d.get("dashes") or ""
         dashed = bool(dashes) and dashes.strip() not in ("", "[] 0")
         typ = d["type"]
-        polys = _flatten_items(d["items"])
+        polys = _flatten_items_pymupdf(d["items"])
 
         # dau mui ten: fill nho, khong stroke
         if typ == "f" and max(w, h) <= arrowhead_max:
@@ -165,7 +202,7 @@ def classify(page, block_min_area=BLOCK_MIN_AREA, arrowhead_max=ARROWHEAD_MAX):
     return blocks, boundaries, edges, heads, masks
 
 
-def text_spans(page, pad=LABEL_PAD):
+def text_spans_pymupdf(page, pad=LABEL_PAD):
     out = []
     raw = page.get_text("rawdict")
     for blk in raw["blocks"]:
@@ -185,6 +222,211 @@ def text_spans(page, pad=LABEL_PAD):
                     "geom": box(b[0] + pad, b[1] + pad, b[2] - pad, b[3] - pad),
                 })
     return out
+
+
+# ---- backend: pdfplumber (MIT, mac dinh) ----------------------------------
+
+def _pp_color_is_white(c):
+    """non_stroking_color trong pdfplumber co the la float, tuple, hoac None."""
+    if c is None:
+        return False
+    if isinstance(c, (int, float)):
+        return float(c) > 0.95
+    try:
+        vals = [float(v) for v in c]
+    except (TypeError, ValueError):
+        return False
+    if not vals:
+        return False
+    if len(vals) == 4:      # CMYK: trang = 0,0,0,0
+        return all(v < 0.05 for v in vals)
+    return all(v > 0.95 for v in vals)
+
+
+def _pp_dashed(dash):
+    """LTCurve.dashing_style = (pattern, phase). Rong/None = lien tuc."""
+    if not dash:
+        return False
+    pattern = dash[0] if isinstance(dash, (tuple, list)) else dash
+    if pattern is None:
+        return False
+    try:
+        return any(float(v) > 0 for v in pattern)
+    except (TypeError, ValueError):
+        return False
+
+
+def _pp_polylines(pts):
+    """LTCurve.pts -> danh sach polyline (pdfminer da flatten Bezier)."""
+    clean = []
+    for p in pts or []:
+        try:
+            clean.append((float(p[0]), float(p[1])))
+        except (TypeError, ValueError, IndexError):
+            continue
+    return [clean] if len(clean) >= 2 else []
+
+
+def classify_pdfplumber(page, block_min_area=BLOCK_MIN_AREA,
+                        arrowhead_max=ARROWHEAD_MAX):
+    """Phan loai drawing (backend pdfplumber).
+
+    zorder lay tu thu tu duyet page.layout, VON GIU dung thu tu content
+    stream — bat buoc cho check G6 (mask chi che duoc khi ve SAU duong).
+    Toa do doi sang goc TREN-trai de trung he voi PyMuPDF.
+    """
+    from pdfminer.layout import LTChar, LTCurve
+
+    blocks, boundaries, edges, heads, masks = [], [], [], [], []
+    H = float(page.height)
+
+    def flip(x0, y0, x1, y1):
+        """pdfminer y tinh tu DUOI len; doi sang tren-xuong."""
+        return (float(x0), H - float(y1), float(x1), H - float(y0))
+
+    zi = -1
+    stack = list(getattr(page.layout, "_objs", []) or [])
+    ordered = []
+    while stack:
+        obj = stack.pop(0)
+        if isinstance(obj, LTChar):
+            continue
+        if isinstance(obj, LTCurve):
+            ordered.append(obj)
+            continue
+        kids = getattr(obj, "_objs", None)
+        if kids:
+            stack = list(kids) + stack
+
+    for obj in ordered:
+        zi += 1
+        bb = flip(obj.x0, obj.y0, obj.x1, obj.y1)
+        w, h = bb[2] - bb[0], bb[3] - bb[1]
+        area = w * h
+        filled = bool(getattr(obj, "fill", False))
+        stroked = bool(getattr(obj, "stroke", False))
+        dashed = _pp_dashed(getattr(obj, "dashing_style", None))
+        pts = [(x, H - y) for x, y in
+               ((float(p[0]), float(p[1])) for p in (obj.pts or []))]
+        bbox = (_r(bb[0]), _r(bb[1]), _r(bb[2]), _r(bb[3]))
+        geom_box = box(*bb) if w > 0 and h > 0 else None
+
+        # dau mui ten: fill nho, khong stroke
+        if filled and not stroked and max(w, h) <= arrowhead_max:
+            heads.append(Elem("arrowhead", bbox, geom_box or box(
+                bb[0], bb[1], bb[0] + 0.01, bb[1] + 0.01), zorder=zi))
+            continue
+
+        # mask trang
+        if filled and not stroked and _pp_color_is_white(
+                getattr(obj, "non_stroking_color", None)):
+            masks.append(Elem("mask", bbox, geom_box or box(
+                bb[0], bb[1], bb[0] + 0.01, bb[1] + 0.01), zorder=zi))
+            continue
+
+        # block / boundary: co fill va du to
+        if filled and area >= block_min_area and geom_box is not None:
+            e = Elem("boundary" if dashed else "block", bbox, geom_box,
+                     dashed=dashed, zorder=zi)
+            (boundaries if dashed else blocks).append(e)
+            continue
+
+        # edge: stroke-only
+        if stroked and not filled:
+            for pl in _pp_polylines(pts):
+                try:
+                    ls = LineString(pl)
+                except Exception:
+                    continue
+                if ls.length < 1.0:
+                    continue
+                edges.append(Elem("edge", bbox, ls, dashed=dashed,
+                                  poly=[(_r(x), _r(y)) for x, y in pl],
+                                  zorder=zi))
+            continue
+
+        # fill+stroke nho: van coi la block
+        if filled and geom_box is not None:
+            e = Elem("boundary" if dashed else "block", bbox, geom_box,
+                     dashed=dashed, zorder=zi)
+            (boundaries if dashed else blocks).append(e)
+
+    return blocks, boundaries, edges, heads, masks
+
+
+def text_spans_pdfplumber(page, pad=LABEL_PAD):
+    """Gom char thanh span theo font+size+dong (backend pdfplumber).
+
+    pdfplumber khong co khai niem 'span' nhu PyMuPDF, nen phai gom tay:
+    cung fontname + size + baseline, va khoang cach ngang khong qua rong.
+    """
+    # KHONG sort theo toa do. page.chars da theo THU TU STREAM, tuc la char
+    # trong cung mot lenh ve chu (Tj) nam lien nhau. Sort theo (top, x0) se
+    # tron char cua HAI NHAN CHONG NHAU o cung dong thanh mot span duy nhat
+    # -> mat sach check G3. Day dung la loi da gap: fixture bad.tex bao 5 loi
+    # G3 voi PyMuPDF nhung 0 loi khi con sort.
+    chars = list(page.chars)
+    spans, cur = [], None
+
+    def flush():
+        nonlocal cur
+        if cur and cur["text"].strip():
+            x0, y0, x1, y1 = cur["x0"], cur["y0"], cur["x1"], cur["y1"]
+            spans.append({
+                "text": cur["text"],
+                "size": cur["size"],
+                "font": cur["font"],
+                "bbox": (_r(x0), _r(y0), _r(x1), _r(y1)),
+                "geom": box(x0 + pad, y0 + pad, max(x1 - pad, x0 + pad + 0.01),
+                            max(y1 - pad, y0 + pad + 0.01)),
+            })
+        cur = None
+
+    for c in chars:
+        txt = c.get("text") or ""
+        size = float(c.get("size") or 0)
+        font = c.get("fontname") or ""
+        x0, x1 = float(c["x0"]), float(c["x1"])
+        top, bottom = float(c["top"]), float(c["bottom"])
+        gap = x0 - cur["x1"] if cur is not None else 0.0
+        # BUG DA GAP: dieu kien chi kiem gap <= nguong se dung voi ca gap AM
+        # lon, nen hai nhan chong nhau tren cung mot dong bi gop thanh MOT
+        # span -> G3 mat hoan toan kha nang phat hien. Phai chan nhay LUI:
+        # chi cho phep kerning am nhe (~1pt), con lui nhieu la nhan khac.
+        # Nguong tien cung phai nho de tach theo TU (khop voi span cua
+        # PyMuPDF), vi khoang trang giua tu trong PDF TikZ thuong khong co
+        # char space that ma chi la gap ~3pt.
+        same = (cur is not None
+                and abs(cur["size"] - size) < 0.05
+                and cur["font"] == font
+                and abs(cur["top"] - top) < 0.6
+                and -1.0 <= gap <= max(1.5, size * 0.15))
+        if not same:
+            flush()
+            cur = {"text": "", "size": size, "font": font, "top": top,
+                   "x0": x0, "y0": top, "x1": x1, "y1": bottom}
+        cur["text"] += txt
+        cur["x1"] = max(cur["x1"], x1)
+        cur["y0"] = min(cur["y0"], top)
+        cur["y1"] = max(cur["y1"], bottom)
+    flush()
+    return spans
+
+
+# ---- dispatcher ------------------------------------------------------------
+
+def classify(page, block_min_area=BLOCK_MIN_AREA, arrowhead_max=ARROWHEAD_MAX):
+    """Phan loai phan tu, tu dong chon backend theo loai `page`."""
+    if hasattr(page, "get_drawings"):
+        return classify_pymupdf(page, block_min_area, arrowhead_max)
+    return classify_pdfplumber(page, block_min_area, arrowhead_max)
+
+
+def text_spans(page, pad=LABEL_PAD):
+    """Trich nhan, tu dong chon backend theo loai `page`."""
+    if hasattr(page, "get_text"):
+        return text_spans_pymupdf(page, pad)
+    return text_spans_pdfplumber(page, pad)
 
 
 # ---- checks ---------------------------------------------------------------
@@ -458,12 +700,53 @@ def check_label_edge(spans, edges, masks, min_area=EDGE_CLASH_MIN):
 
 # ---- driver ---------------------------------------------------------------
 
+class _PageBox:
+    """Bao boc page cua ca hai backend de check_bounds dung chung interface."""
+
+    def __init__(self, x0, y0, x1, y1):
+        self.rect = _Rect(x0, y0, x1, y1)
+
+
+class _Rect:
+    def __init__(self, x0, y0, x1, y1):
+        self.x0, self.y0, self.x1, self.y1 = x0, y0, x1, y1
+
+    @property
+    def width(self):
+        return self.x1 - self.x0
+
+    @property
+    def height(self):
+        return self.y1 - self.y0
+
+
+def _open_page(pdf_path, page_no):
+    """Mo trang PDF bang backend dang hoat dong.
+
+    Tra ve (page, page_rect_like, closer). pdfplumber la mac dinh (MIT);
+    PyMuPDF (AGPL) chi dung khi TIKZGATE_PDF_BACKEND=pymupdf.
+    """
+    if _active_backend() == "pymupdf":
+        doc = fitz.open(pdf_path)
+        if page_no >= doc.page_count:
+            raise ValueError(
+                f"page {page_no} khong ton tai (co {doc.page_count})")
+        page = doc[page_no]
+        return page, page, doc.close
+    import pdfplumber
+    pdf = pdfplumber.open(pdf_path)
+    if page_no >= len(pdf.pages):
+        pdf.close()
+        raise ValueError(f"page {page_no} khong ton tai (co {len(pdf.pages)})")
+    page = pdf.pages[page_no]
+    holder = _PageBox(float(page.bbox[0]), float(page.bbox[1]),
+                      float(page.bbox[2]), float(page.bbox[3]))
+    return page, holder, pdf.close
+
+
 def analyze(pdf_path, page_no=0, min_font=MIN_FONT, eps=ENDPOINT_EPS,
             margin=0.0, block_min_area=BLOCK_MIN_AREA):
-    doc = fitz.open(pdf_path)
-    if page_no >= doc.page_count:
-        raise ValueError(f"page {page_no} khong ton tai (co {doc.page_count})")
-    page = doc[page_no]
+    page, page_holder, close = _open_page(pdf_path, page_no)
     blocks, boundaries, edges, heads, masks = classify(
         page, block_min_area=block_min_area)
     spans = text_spans(page)
@@ -472,12 +755,12 @@ def analyze(pdf_path, page_no=0, min_font=MIN_FONT, eps=ENDPOINT_EPS,
     findings += check_edge_through_block(edges, blocks, eps=eps)
     findings += check_label_block(spans, blocks)
     findings += check_label_label(spans)
-    findings += check_bounds(page, blocks + boundaries + edges, spans,
+    findings += check_bounds(page_holder, blocks + boundaries + edges, spans,
                              margin=margin)
     findings += check_tiny_text(spans, min_font=min_font)
     findings += check_label_edge(spans, edges, masks)
 
-    pr = page.rect
+    pr = page_holder.rect
     inventory = {
         "blocks": len(blocks), "boundaries": len(boundaries),
         "edges": len(edges), "arrowheads": len(heads),
@@ -485,29 +768,95 @@ def analyze(pdf_path, page_no=0, min_font=MIN_FONT, eps=ENDPOINT_EPS,
         "pageWidthPt": _r(pr.width), "pageHeightPt": _r(pr.height),
         "minFontPt": _r(min(([s["size"] for s in spans] or [0])), 2),
     }
-    doc.close()
+    close()
     return findings, inventory, (blocks, boundaries, edges, spans)
 
 
-def annotate(pdf_path, out_png, findings, page_no=0, zoom=3.0):
-    """Ve khung do quanh vung loi de nguoi soi bang mat."""
-    doc = fitz.open(pdf_path)
-    page = doc[page_no]
+def _annotate_rects(findings):
+    """Gom bbox va diem giua tu findings de ve khung."""
+    out = []
     for f in findings:
         ev = f.evidence
-        rects = []
+        rects, dots = [], []
         for key in ("blockBbox", "labelBbox", "bbox", "bboxA", "bboxB"):
-            if key in ev and isinstance(ev[key], (list, tuple)) and len(ev[key]) == 4:
-                rects.append(fitz.Rect(*ev[key]))
+            v = ev.get(key)
+            if isinstance(v, (list, tuple)) and len(v) == 4:
+                rects.append(tuple(float(x) for x in v))
+        mp = ev.get("midPoint")
+        if isinstance(mp, (list, tuple)) and len(mp) == 2:
+            dots.append((float(mp[0]), float(mp[1])))
+        out.append((rects, dots))
+    return out
+
+
+def _annotate_pymupdf(pdf_path, out_png, findings, page_no, zoom):
+    doc = fitz.open(pdf_path)
+    page = doc[page_no]
+    for rects, dots in _annotate_rects(findings):
         for r in rects:
-            page.draw_rect(r, color=(1, 0, 0), width=0.8)
-        if "midPoint" in ev:
-            x, y = ev["midPoint"]
+            page.draw_rect(fitz.Rect(*r), color=(1, 0, 0), width=0.8)
+        for x, y in dots:
             page.draw_circle(fitz.Point(x, y), 4, color=(1, 0, 0), width=1.2)
     pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom))
     pix.save(out_png)
     doc.close()
     return out_png
+
+
+def _annotate_pdftocairo(pdf_path, out_png, findings, page_no, zoom):
+    """Khong co PyMuPDF: render bang pdftocairo roi ve khung bang Pillow.
+
+    Toa do PDF goc o goc DUOI-trai theo quy uoc PDF, nhung ca hai backend cua
+    gate deu tra bbox theo he TREN-trai (pdfplumber dung top/bottom, PyMuPDF
+    cung vay), nen chi can nhan zoom.
+    """
+    import shutil
+    import subprocess
+    import tempfile
+
+    if shutil.which("pdftocairo") is None:
+        raise RuntimeError("thieu pdftocairo (poppler-utils) de --annotate")
+    try:
+        from PIL import Image, ImageDraw
+    except ImportError as exc:  # pragma: no cover
+        raise RuntimeError("thieu Pillow de --annotate") from exc
+
+    dpi = int(round(72 * zoom))
+    with tempfile.TemporaryDirectory() as td:
+        base = os.path.join(td, "page")
+        subprocess.run(
+            ["pdftocairo", "-png", "-r", str(dpi),
+             "-f", str(page_no + 1), "-l", str(page_no + 1),
+             "-singlefile", str(pdf_path), base],
+            check=True, capture_output=True)
+        png = base + ".png"
+        if not os.path.exists(png):
+            raise RuntimeError("pdftocairo khong tao duoc PNG")
+        img = Image.open(png).convert("RGB")
+        drw = ImageDraw.Draw(img)
+        s = dpi / 72.0
+        for rects, dots in _annotate_rects(findings):
+            for x0, y0, x1, y1 in rects:
+                drw.rectangle([x0 * s, y0 * s, x1 * s, y1 * s],
+                              outline=(255, 0, 0), width=max(1, int(s)))
+            for x, y in dots:
+                r = 4 * s
+                drw.ellipse([x * s - r, y * s - r, x * s + r, y * s + r],
+                            outline=(255, 0, 0), width=max(1, int(s)))
+        img.save(out_png)
+    return out_png
+
+
+def annotate(pdf_path, out_png, findings, page_no=0, zoom=3.0):
+    """Ve khung do quanh vung loi de nguoi soi bang mat.
+
+    Dung PyMuPDF khi co (nhanh hon), nguoc lai dung pdftocairo + Pillow de
+    khong buoc phai cai PyMuPDF (AGPL) chi de xuat anh.
+    """
+    if _active_backend() == "pymupdf" and fitz is not None:
+        return _annotate_pymupdf(pdf_path, out_png, findings, page_no, zoom)
+    return _annotate_pdftocairo(pdf_path, out_png, findings, page_no, zoom)
+
 
 
 def main(argv=None):
