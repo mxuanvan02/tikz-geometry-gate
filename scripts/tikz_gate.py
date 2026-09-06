@@ -80,6 +80,12 @@ MIN_FONT = 6.0
 EDGE_CLASH_MIN = 1.0     # dien tich giao toi thieu label-edge
 SUBSCRIPT_MAX_CHARS = 4  # sub/superscript hop le toi da may ky tu
 SCRIPT_SIZE_RATIO = 0.85  # span nho <= 85% span goc -> coi la sub/superscript
+# Chi so THAT (R_t, B_t) chi cham nhe ky tu goc do kerning; dien tich giao rat
+# nho so voi span nho. Neu giao SAU thi day la VA CHAM THAT, khong phai chi so.
+# BAY DA GAP (anh Van phat hien bang mat): trong fig2_turn_geometry, nhan do
+# 'CO(i)' co size 6.97 nam canh nhan 'i' size 9.96 -> ty le 0.70 <= 0.85 va
+# gap am nen bi coi la subscript => G3 BO SOT mot va cham 23.8pt2 nhin thay ro.
+SCRIPT_MAX_OVERLAP_FRAC = 0.12
 SUBSCRIPT_FLOOR_RATIO = 0.55  # sub nho hon 55% body font -> teo that, bao loi
 MASK_COVER_RATIO = 0.75  # mask che >=75% dien tich nhan -> coi la co mask
 FIGURE_PAD = 6.0         # noi rong vung hinh (pt) de bat nhan sat vien hinh
@@ -114,10 +120,15 @@ FONT_SIZE_TOL = 0.02           # sai so lam tron khi so voi san (pt)
 # baseline, nen bbox cua no BAO TRUM ca cong thuc ben trong. Chong nhan la TAT
 # NHIEN va dung thiet ke, khong phai loi bo cuc. Co chu cua font nay la tham so
 # CO GIAN, khong phai thuoc do doc duoc -> mien ca kiem tra co chu.
+# CHI font MO RONG (family 3) moi duoc mien. BAY DA GAP (anh Van phat hien
+# bang mat, gate bo sot): regex cu co ca `cmmi` va `cmsy`, nhung CMMI la font
+# TOAN NGHIENG CO THUONG (chu i, x, alpha...) va CMSY la font KY HIEU CO
+# THUONG — bbox cua chung binh thuong, khong he sau 1.76em. Mien ca hai lam
+# gate BO SOT moi va cham giua bien toan va nhan khac: trong fig2, nhan do
+# 'CO(i)' de len chu 'i' 23.8pt2 ma gate bao pass. Chi CMEX/size-variant moi
+# co CHARDP khong lo va dang duoc mien.
 MATH_EXT_FONT_RE = re.compile(
-    r"(cmex|lmex|stixsize|xitssize|xitsmath|latinmodernmath|"
-    r"texgyre\w*math|msam|msbm|cmsy|lmsy|cmmi|lmmi|"
-    r"asana|neoeuler|libertinusmath|notosansmath|fira\w*math)",
+    r"(cmex|lmex|stixsize|xitssize|texgyre\\w*math-?size)",
     re.IGNORECASE,
 )
 
@@ -133,6 +144,38 @@ MATH_DESIGN_FONT_RE = re.compile(
     r"eur\w*\d|eus\w*\d|msam\d|msbm\d)",
     re.IGNORECASE,
 )
+
+
+# Dau hieu HINH HOC cho glyph ngoac/toan tu lon, dung khi ten font khong du.
+# Font toan OpenType (XITSMath-Regular, LatinModernMath, STIX Two Math) chua CA
+# chu nghieng thuong LAN ngoac lon trong MOT file, nen mien theo TEN font se
+# qua rong y nhu bay CMMI10. Dau hieu dung la HINH HOC:
+#   - Da verify tai may: cmex10.tfm parenleftBig co CHARHT 0.04em + CHARDP 1.76em
+#     => cao tong 1.8 lan co chu.
+#   - Chu thuong (ke ca 'i' co dau) chi cao khoang 1.0-1.2 lan co chu.
+# Nen ty le (chieu cao bbox / co chu) > 1.5 la glyph gian kich thuoc.
+OVERSIZED_GLYPH_RATIO = 1.5
+
+
+def is_oversized_glyph(span) -> bool:
+    """True khi span cao bat thuong so voi co chu -> ngoac/toan tu lon.
+
+    Mien khoi G3/G6 vi bbox cua no BAO TRUM cong thuc ben trong theo thiet ke.
+    """
+    size = float(span.get("size") or 0)
+    if size <= 0:
+        return False
+    b = span.get("bbox")
+    if not b or len(b) != 4:
+        return False
+    height = abs(float(b[3]) - float(b[1]))
+    return height / size > OVERSIZED_GLYPH_RATIO
+
+
+def is_large_math_glyph(span) -> bool:
+    """Mien G3/G6: font mo rong thuan, HOAC glyph gian kich thuoc."""
+    return (is_math_ext_font(span.get("font", ""))
+            or is_oversized_glyph(span))
 
 
 def is_math_ext_font(font: str) -> bool:
@@ -766,7 +809,14 @@ def _is_script_pair(a: dict, b: dict) -> bool:
         return False
     # phai ke sat theo chieu ngang: khoang cach mep duoi 2pt
     gap = max(small["bbox"][0] - big["bbox"][2], big["bbox"][0] - small["bbox"][2])
-    return gap <= 2.0
+    if gap > 2.0:
+        return False
+    # ...VA giao phai nho. Chi so ke ben chi cham vien; giao sau = va cham that.
+    ga, gb = small.get("geom"), big.get("geom")
+    if ga is not None and gb is not None and ga.area > 0:
+        if ga.intersection(gb).area / ga.area > SCRIPT_MAX_OVERLAP_FRAC:
+            return False
+    return True
 
 
 def _is_punct_pair(ta: str, tb: str) -> bool:
@@ -793,8 +843,7 @@ def check_label_label(spans, regions=NO_FILTER):
             # den 1.76em: bbox cua no BAO TRUM ca cong thuc ben trong, nen
             # chong nhan la dung thiet ke. Verify tai may: cmex10.tfm cid 16
             # (parenleftBig) co CHARDP R 1.760019.
-            if (is_math_ext_font(a.get("font", ""))
-                    or is_math_ext_font(b.get("font", ""))):
+            if is_large_math_glyph(a) or is_large_math_glyph(b):
                 continue
             if not a["geom"].intersects(b["geom"]):
                 continue

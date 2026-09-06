@@ -352,3 +352,19 @@ sẽ báo 2-3 "lỗi" cho **mỗi chữ có dấu**.
 
 Quy tắc: **không bao giờ so bbox trong cùng một nhãn**. Gộp glyph advance = 0 vào
 glyph trước nó, và chỉ so *giữa các nhãn khác nhau*.
+
+**9. Miễn font toán theo TÊN là quá rộng — phải đo hình học.** Bản đầu em cho cả `cmmi` vào danh sách miễn, mà `CMMI10` là font **toán nghiêng cỡ thường** (chữ `i`, `x`, `n` trong công thức). Kết quả: gate bỏ sót đúng ca người dùng thấy bằng mắt — nhãn `i` bị chữ `CO` đè 14.5pt². Đã đo bằng `tftopl` trên máy:
+
+| font | max CHARHT+CHARDP |
+|---|---|
+| `cmex10` | **3.71em** ← font mở rộng thật |
+| `cmsy10` | 1.71em |
+| `msam10` | 1.47em |
+| `msbm10` | 1.34em |
+| `cmmi10` / `cmr10` | 1.00em |
+
+Chỉ `cmex`/`lmex`/`STIXSize*`/`XITSSize*` là font **chỉ chứa** ký hiệu giãn kích thước. Với font toán OpenType (`XITSMath-Regular` chứa cả chữ nghiêng lẫn ngoặc lớn) thì tên font vô dụng — phải nhận diện theo **tỉ lệ chiều cao bbox / cỡ chữ** của từng glyph (`is_oversized_glyph`).
+
+**10. `\draw (b0)--(b1)` với `b0` là TOẠ ĐỘ, không phải TÊN NODE.** Đây là lỗi thật tìm được trong `fig2_turn_geometry.tex`: node tên `nb0` nhưng `\draw` dùng `(b0)` — toạ độ thô. TikZ vẽ **tâm đến tâm**, đường xuyên qua thân vòng tròn. Nối bằng tên node `(nb0)--(nb1)` thì TikZ tự cắt ở viền. Sửa 4 dòng → 9 lỗi về 0.
+
+**11. Bản thảo nhúng PDF, không nhúng .tex.** Sửa `.tex` của hình rồi build bản thảo vẫn ra y nguyên lỗi cũ, vì `tieuluan.tex` dùng `\includegraphics{fig2_turn_geometry.pdf}`. Phải rebuild PDF của hình **và** đồng bộ mọi bản copy của PDF đó (ở đây có 6 bản trên máy) trước khi build bản thảo.

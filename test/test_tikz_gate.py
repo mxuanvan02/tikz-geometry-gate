@@ -802,13 +802,75 @@ class TestMathExtensionFontExempt(unittest.TestCase):
     """
 
     def test_cmex_recognised(self):
-        for f in ("BGQDBJ+CMEX10", "cmex10", "LMEX10", "STIXSizeOneSym",
-                  "XITSMath-Regular", "LatinModernMath-Regular"):
+        """Font CHI chua ky hieu gian kich thuoc -> mien theo TEN font.
+
+        Da do bang tftopl tren may (max CHARHT+CHARDP, don vi em):
+          cmex10 3.710  <- bbox bao trum cong thuc, phai mien
+          cmsy10 1.710 | msam10 1.465 | msbm10 1.339 | cmmi10 1.000
+        Chi cmex/lmex (va cac font *Size* cua OpenType math) vuot 2em.
+        """
+        for f in ("BGQDBJ+CMEX10", "cmex10", "LMEX10",
+                  "STIXSizeOneSym", "XITSSizeOneSym"):
             self.assertTrue(G.is_math_ext_font(f), f)
+
+    def test_ordinary_math_font_not_exempt_by_name(self):
+        """CMMI/CMSY/MSAM la font toan CO THUONG -> khong mien theo ten.
+
+        BUG DA GAP (anh Van phat hien bang mat): 'cmmi' tung nam trong regex,
+        nen chu 'i' nghieng cua CMMI10 duoc mien oan va gate BO SOT loi that
+        'i' chong 'CO' (14.5pt2) trong fig2_turn_geometry.
+        """
+        for f in ("VEABLN+CMMI10", "XX+CMSY10", "msam10", "msbm10"):
+            self.assertFalse(G.is_math_ext_font(f), f)
 
     def test_text_font_not_exempt(self):
         for f in ("WZCXRH+CMR6", "DejaVuSans", "TimesNewRomanPSMT", ""):
             self.assertFalse(G.is_math_ext_font(f), f)
+
+    def test_inline_math_font_not_exempt_by_name(self):
+        """REGRESSION (anh Van phat hien bang mat): CMMI10 KHONG duoc mien.
+
+        CMMI10 la font toan NGHIENG CO THUONG — chua i, j, x, alpha... o co
+        binh thuong. Truoc day regex co 'cmmi' nen moi chu 'i' trong cong thuc
+        duoc mien khoi G3 -> gate bo sot chinh cho chu do 'CO(i)' de len chu
+        'i' trong fig2_turn_geometry, ma mat nguoi thay ngay.
+
+        Font toan OpenType (XITSMath, LatinModernMath) cung vay: mot file chua
+        CA chu nghieng thuong LAN ngoac lon, nen mien theo ten la qua rong.
+        Phai mien theo HINH HOC (is_oversized_glyph) chu khong theo ten.
+        """
+        for f in ("VEABLN+CMMI10", "CMMI12", "cmsy10", "XITSMath-Regular",
+                  "LatinModernMath-Regular"):
+            self.assertFalse(G.is_math_ext_font(f), f)
+
+    def test_oversized_glyph_exempt_by_geometry(self):
+        """Ngoac lon nhan dien qua ty le cao/co chu, khong can biet ten font."""
+        # CHARDP 1.76em + CHARHT 0.04em => cao ~1.8 lan co chu
+        big = mk_span("(", 296, 178, 304, 200, size=11.9552)
+        big["font"] = "XITSMath-Regular"
+        self.assertTrue(G.is_oversized_glyph(big))
+        self.assertTrue(G.is_large_math_glyph(big))
+
+    def test_normal_glyph_not_oversized(self):
+        """Chu thuong cao ~1.0 lan co chu -> khong mien."""
+        normal = mk_span("i", 25.5, 93.3, 28.9, 103.3, size=9.9626)
+        normal["font"] = "VEABLN+CMMI10"
+        self.assertFalse(G.is_oversized_glyph(normal))
+        self.assertFalse(G.is_large_math_glyph(normal))
+
+    def test_g3_flags_inline_math_over_text(self):
+        """Ca THAT trong fig2: 'CO' (Times 6.97pt) de len 'i' (CMMI10 9.96pt).
+
+        Da do tu PDF that: 'i' bbox=(25.5,93.3,28.9,103.3), 'CO'
+        bbox=(19.3,95.6,29.0,102.6) -> giao 14.5pt2. Mat nguoi thay ro.
+        """
+        a = mk_span("i", 25.5, 93.3, 28.9, 103.3, size=9.9626)
+        a["font"] = "VEABLN+CMMI10"
+        b = mk_span("CO", 19.3, 95.6, 29.0, 102.6, size=6.9738)
+        b["font"] = "KHDWKU+TimesNewRomanPSMT"
+        out = G.check_label_label([a, b])
+        self.assertEqual(len(out), 1, "phai bat duoc chu de len chu")
+        self.assertEqual(out[0].code, "G3/label-label-overlap")
 
     def test_g3_skips_math_ext_glyph(self):
         """nhan 'd' chong '(cid:16)' cua CMEX10 -> khong bao loi."""
