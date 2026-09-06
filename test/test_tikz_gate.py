@@ -742,5 +742,98 @@ class TestGateAfterBuildHook(unittest.TestCase):
         self.assertGreater(pngs[0].stat().st_size, 1000)
 
 
+class TestUnitConversionBpToTexPt(unittest.TestCase):
+    """REGRESSION: PDF ghi co chu bang BIG POINT, TeX dung PRINTER POINT.
+
+    Da verify TAI MAY bang mutool tren VietLegalShift/main.pdf: toan bo Tf
+    operand la 5.9776 / 7.9701 / 10.9091 / 11.9552 / 14.3462 / 17.2154 /
+    20.6625 — tuc la 6 / 8 / 10.95 / 12 / 14.4 / 17.28 / 20.74 TeX pt.
+    Gate cu so 5.9776 < 6.0 roi bao loi: sai 0.37% do lech don vi, va no
+    misfire tren MOI co chu nam dung tren nguong, trong MOI file LaTeX.
+    """
+
+    def test_factor_is_72_over_7227(self):
+        self.assertAlmostEqual(G.BP_TO_TEXPT, 72.27 / 72.0, places=9)
+
+    def test_six_texpt_reads_as_598_bp(self):
+        """6.00 TeX pt hien thanh 5.98 trong PDF — quan sat that cua gate."""
+        self.assertAlmostEqual(G.to_texpt(5.9776), 6.0, places=3)
+
+    def test_twelve_texpt_reads_as_1196_bp(self):
+        self.assertAlmostEqual(G.to_texpt(11.9552), 12.0, places=3)
+
+    def test_598_is_not_below_six_pt_floor(self):
+        """Chu 5.98bp = 6.00pt KHONG duoi san 6pt. Day la false positive cu."""
+        sp = mk_span("1", 10, 10, 14, 16, size=5.9776)
+        sp["font"] = "WZCXRH+CMR6"
+        out = G.check_tiny_text([sp], min_font=6.0, base_font=9.9626,
+                                kind="document")
+        self.assertEqual(out, [], "6.00 TeX pt la dung san, khong phai loi")
+
+    def test_genuinely_tiny_text_still_flagged(self):
+        """2.18bp = 2.19pt thi KHONG khop design size nao -> loi that."""
+        sp = mk_span("l", 10, 10, 12, 13, size=2.18)
+        sp["font"] = "BMQQDV+DejaVuSans"
+        out = G.check_tiny_text([sp], min_font=6.0, base_font=9.9626,
+                                kind="document")
+        self.assertEqual(len(out), 1, "2.19pt phai bao loi")
+
+
+class TestCmDesignSizes(unittest.TestCase):
+    """Co thiet ke Computer Modern: 5/6/7/8/9/10/10.95/12/14.4/17.28/20.74."""
+
+    def test_design_sizes_recognised(self):
+        for pt in (5, 6, 7, 8, 9, 10, 10.95, 12):
+            self.assertTrue(G.is_cm_design_size(pt), f"{pt}pt la design size")
+
+    def test_non_design_size_rejected(self):
+        for pt in (2.188, 2.519, 3.4, 4.2):
+            self.assertFalse(G.is_cm_design_size(pt), f"{pt}pt khong phai")
+
+
+class TestMathExtensionFontExempt(unittest.TestCase):
+    """CMEX10 = TeX math family 3 (font ky hieu mo rong).
+
+    Da verify TAI MAY:
+      cmex10.pfb dong 52-53: cid 16 = parenleftBig, cid 17 = parenrightBig
+      cmex10.tfm: CHARWD 0.597em, CHARHT 0.04em, CHARDP 1.760em
+    Dau ngoac SAU 1.76 lan co chu duoi baseline, nen bbox cua no BAO TRUM
+    ca cong thuc ben trong. Chong nhan la TAT NHIEN, dung thiet ke TeX.
+    """
+
+    def test_cmex_recognised(self):
+        for f in ("BGQDBJ+CMEX10", "cmex10", "LMEX10", "STIXSizeOneSym",
+                  "XITSMath-Regular", "LatinModernMath-Regular"):
+            self.assertTrue(G.is_math_ext_font(f), f)
+
+    def test_text_font_not_exempt(self):
+        for f in ("WZCXRH+CMR6", "DejaVuSans", "TimesNewRomanPSMT", ""):
+            self.assertFalse(G.is_math_ext_font(f), f)
+
+    def test_g3_skips_math_ext_glyph(self):
+        """nhan 'd' chong '(cid:16)' cua CMEX10 -> khong bao loi."""
+        a = mk_span("d", 300, 180, 306, 192)
+        a["font"] = "PPLYPY+DejaVuSerif"
+        b = mk_span("(cid:16)", 296, 178, 304, 200, size=11.9552)
+        b["font"] = "BGQDBJ+CMEX10"
+        out = G.check_label_label([a, b])
+        self.assertEqual(out, [], "ngoac lon CMEX phai duoc mien")
+
+    def test_g3_still_flags_two_text_labels(self):
+        a = mk_span("Overlapping", 60, 100, 160, 112)
+        a["font"] = "DejaVuSans"
+        b = mk_span("Overlapping", 70, 100, 170, 112)
+        b["font"] = "DejaVuSans"
+        out = G.check_label_label([a, b])
+        self.assertEqual(len(out), 1, "hai nhan chu that van phai bao")
+
+    def test_g5_skips_math_ext_glyph(self):
+        sp = mk_span("(cid:16)", 296, 178, 304, 200, size=2.0)
+        sp["font"] = "BGQDBJ+CMEX10"
+        out = G.check_tiny_text([sp], min_font=6.0, base_font=10.0,
+                                kind="document")
+        self.assertEqual(out, [], "glyph CMEX: co chu la tham so scale")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

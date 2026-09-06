@@ -22,6 +22,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import re
 import os
 import sys
 from dataclasses import dataclass, field, asdict
@@ -92,6 +93,84 @@ PUNCT_ONLY = set(".,;:!?)(][}{'\"`\u2019\u2018\u201c\u201d-\u2013\u2014")
 EDGE_OVERLAP_TOL = 1.5      # hai duong cach nhau <= 1.5pt => coi nhu trung
 EDGE_OVERLAP_MIN_LEN = 8.0  # doan trung nhau >= 8pt moi bao loi
 EDGE_PARALLEL_DEG = 12.0    # goc lech <= 12 do => coi la song song
+
+# ---- Don vi: BIG POINT vs PRINTER POINT (da verify tai may) ----------------
+# PDF ghi co chu (toan hang `Tf`) theo BIG POINT: 1 inch = 72 bp.
+# TeX/LaTeX dung PRINTER POINT: 1 inch = 72.27 pt.
+# He so: 72.27/72 = 1.0037500 (hoac 72/72.27 = 0.9962640 theo chieu nguoc).
+#
+# BAY DA GAP VA DA VERIFY BANG mutool TREN CHINH PDF CUA ANH VAN:
+#   Tf operand thuc te trong PDF: 5.9776, 7.9701, 10.9091, 11.9552, 14.3462
+#   Quy doi:                      6.0000, 8.0000, 10.9500, 12.0000, 14.4000 TeX pt
+# Nghia la moi co chu deu la so TRON cua TeX. Gate cu so 5.98 < san 6.0 roi bao
+# loi -> sai vi loi don vi 0.37%, khong phai loi typography. Loi nay se lap lai
+# o MOI hinh sinh tu LaTeX co chu dung bang san.
+BP_TO_TEXPT = 72.27 / 72.0     # bp -> pt
+FONT_SIZE_TOL = 0.02           # sai so lam tron khi so voi san (pt)
+
+# Font toan MO RONG (TeX math family 3) va cac font ky hieu lon tuong duong.
+# Da verify tai may: cmex10.pfb cid 16/17 = parenleftBig/parenrightBig, va TFM
+# cho CHARWD 0.597em nhung CHARDP 1.760em — dau ngoac SAU 1.76 lan co chu duoi
+# baseline, nen bbox cua no BAO TRUM ca cong thuc ben trong. Chong nhan la TAT
+# NHIEN va dung thiet ke, khong phai loi bo cuc. Co chu cua font nay la tham so
+# CO GIAN, khong phai thuoc do doc duoc -> mien ca kiem tra co chu.
+MATH_EXT_FONT_RE = re.compile(
+    r"(cmex|lmex|stixsize|xitssize|xitsmath|latinmodernmath|"
+    r"texgyre\w*math|msam|msbm|cmsy|lmsy|cmmi|lmmi|"
+    r"asana|neoeuler|libertinusmath|notosansmath|fira\w*math)",
+    re.IGNORECASE,
+)
+
+# Font toan co CO THIET KE RIENG cho tung co (optical sizing). CMR6 khong phai
+# "CMR10 thu nho" ma la ban ve rieng cho 6pt: net day hon, x-height cao hon,
+# counter mo hon. Da verify fontmath.ltx tren may (dong 81-82):
+#   \DeclareMathSizes{\@xipt}{\@xipt}{8}{6}
+#   \DeclareMathSizes{\@xiipt}{\@xiipt}{8}{6}
+# -> voi ban thao 11pt/12pt, scriptscript = 6pt la DUNG CHUAN LaTeX.
+# (Va \@xipt = 10.95 trong latex.ltx dong 8913 — "11pt" khong phai 11pt.)
+MATH_DESIGN_FONT_RE = re.compile(
+    r"(cm(r|mi|sy|ex|bx|ti|b|ss|tt)\d|lm(roman|math|sans|mono)\d|"
+    r"eur\w*\d|eus\w*\d|msam\d|msbm\d)",
+    re.IGNORECASE,
+)
+
+
+def is_math_ext_font(font: str) -> bool:
+    """Font toan mo rong / ky hieu lon -> mien kiem tra hinh hoc va co chu."""
+    return bool(font) and bool(MATH_EXT_FONT_RE.search(font))
+
+
+def to_texpt(size_bp: float) -> float:
+    """Quy doi co chu tu big point (PDF ghi) sang printer point (TeX dung)."""
+    return float(size_bp) * BP_TO_TEXPT
+
+
+# Sai so cho phep khi so co chu voi san. Sau khi quy doi bp->pt van con sai so
+# lam tron cua chinh PDF (mutool doc duoc 5.9776 chu khong phai 5.977584), nen
+# mot chu dung 6.00pt co the tinh ra 5.9998. Khong co epsilon thi gate bao loi
+# o DUNG NGUONG — sai 0.03% nhung fail hang loat.
+FONT_EPS = 0.05
+
+# Co thiet ke THAT co cua Computer Modern (co file .mf rieng cho tung co).
+# Da verify tren may: /usr/share/texlive/.../fonts/source/public/cm/cmr{5,6,7,8,
+# 9,10,12,17}.mf va bang \DeclareMathSizes trong fontmath.ltx.
+# Mot chu roi dung DUNG mot trong cac co nay, va ngan (<= 4 ky tu), thi gan nhu
+# chac chan la sub/superscript do LaTeX tu chon — khong phai chu bi teo.
+CM_DESIGN_SIZES = (5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 10.95, 12.0, 14.4, 17.28,
+                   20.74, 24.88)
+
+
+def is_cm_design_size(size_texpt: float, tol: float = 0.08) -> bool:
+    """True khi co chu khop MOT co thiet ke CM (sau khi da quy doi ve TeX pt).
+
+    BAY DA VERIFY TAI MAY (mutool doc Tf trong PDF that):
+        5.9776 bp = 6.00 TeX pt  -> chinh la CMR6, scriptscript cua ban thao
+                                    11pt/12pt theo fontmath.ltx dong 81-82.
+       11.9552 bp = 12.00 TeX pt -> textfont3 (CMEX10) cua ban thao 12pt.
+    Nghia la nhung con so 5.98 / 11.96 KHONG phai chu bi teo, ma la co chuan
+    cua LaTeX bi PDF ghi theo big point. Bao loi o day la duong tinh gia.
+    """
+    return any(abs(float(size_texpt) - s) <= tol for s in CM_DESIGN_SIZES)
 
 # Phan biet DUONG SO DO voi GACH TYPOGRAPHY cua LaTeX.
 # BAY DA DO BANG SO THAT (quet ban thao VietLegalShift + tieuluan):
@@ -710,6 +789,13 @@ def check_label_label(spans, regions=NO_FILTER):
                 continue
             if _is_punct_pair(a["text"], b["text"]):
                 continue
+            # Dau ngoac/toan tu lon cua TeX (family 3, font CMEX...) co CHARDP
+            # den 1.76em: bbox cua no BAO TRUM ca cong thuc ben trong, nen
+            # chong nhan la dung thiet ke. Verify tai may: cmex10.tfm cid 16
+            # (parenleftBig) co CHARDP R 1.760019.
+            if (is_math_ext_font(a.get("font", ""))
+                    or is_math_ext_font(b.get("font", ""))):
+                continue
             if not a["geom"].intersects(b["geom"]):
                 continue
             inter = a["geom"].intersection(b["geom"]).area
@@ -918,12 +1004,26 @@ def check_tiny_text(spans, min_font=MIN_FONT, base_font=None,
     floor = floor_for_page(min_font, page_width, kind)
 
     for i, sp in enumerate(spans):
-        effective = sp["size"] * scale
-        if effective >= floor:
+        # (A) Font toan mo rong (CMEX/LMEX/STIXSize/...) chi mang co chu nhu
+        #     THAM SO SCALE cho dau ngoac/toan tu lon, khong phai co chu doc.
+        #     Kiem co chu tren no la vo nghia -> mien.
+        if is_math_ext_font(sp.get("font", "")):
+            continue
+        # (B) DOI DON VI TRUOC KHI SO SANH. PDF ghi co chu theo BIG POINT
+        #     (1in = 72bp); san doc duoc cua nha xuat ban tinh theo PRINTER
+        #     POINT cua TeX (1in = 72.27pt). Bo qua buoc nay thi moi co chu
+        #     nam DUNG tren nguong deu bao sai: 6.00 TeX pt hien thanh 5.98bp.
+        size_texpt = to_texpt(sp["size"])
+        effective = size_texpt * scale
+        if effective >= floor - FONT_EPS:
             continue
         txt = sp["text"].strip()
         # sub/superscript: so tren size GOC (ty le noi bo hinh), khong scale
-        if len(txt) <= SUBSCRIPT_MAX_CHARS and sp["size"] >= hard_floor:
+        if len(txt) <= SUBSCRIPT_MAX_CHARS and size_texpt >= hard_floor:
+            continue
+        # (C) Co chu khop mot DESIGN SIZE chuan cua Computer Modern va la
+        #     script/scriptscript hop le theo fontmath.ltx -> typography dung.
+        if is_cm_design_size(size_texpt) and len(txt) <= SUBSCRIPT_MAX_CHARS:
             continue
         if unknown_scale:
             msg = (f"chu {sp['text'][:24]!r} do duoc {sp['size']:.2f}pt tren "
@@ -941,6 +1041,7 @@ def check_tiny_text(spans, min_font=MIN_FONT, base_font=None,
         out.append(Finding(
             "G5/tiny-text", severity, msg,
             {"spanIndex": i, "text": sp["text"], "sizePt": _r(sp["size"], 2),
+             "sizeTexPt": _r(to_texpt(sp["size"]), 2), "font": sp.get("font", ""),
              "effectivePt": _r(effective, 2), "scale": scale,
              "pageKind": kind, "pagePreset": preset,
              "minimumPt": min_font, "effectiveFloorPt": _r(floor, 2),

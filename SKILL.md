@@ -222,3 +222,133 @@ tương đối giữa mask và edge. Mất zorder là mất luôn check G6 mask 
 3. Sửa xong **build lại và chạy gate lại** — sửa `.tex` không có nghĩa là hết lỗi.
 4. Xuất `--annotate` và soi bằng mắt. Gate chỉ chứng minh hình học; thẩm mỹ vẫn cần người xem.
 5. Kiểm `pdfimages -list` trống (vector thuần) và `pdffonts` nhúng đủ.
+
+## Bẫy 9: PDF ghi cỡ chữ theo BIG POINT, TeX dùng PRINTER POINT
+
+**Đã verify tại máy, không phải suy đoán.** PDF ghi toán hạng `Tf` theo **big point**
+(1 inch = 72 bp); TeX dùng **printer point** (1 inch = 72.27 pt). Hệ số `72/72.27 = 0.996264`.
+
+Hệ quả: mọi cỡ chữ TeX hiện ra trong PDF **nhỏ hơn 0.37%**:
+
+| TeX pt | PDF (bp) |
+|---|---|
+| 5 | 4.98 |
+| 6 | **5.98** |
+| 7 | 6.97 |
+| 8 | 7.97 |
+| 9 | 8.97 |
+| 10 | 9.96 |
+| 10.95 | 10.91 |
+| 12 | **11.96** |
+
+Nếu sàn font là 6pt mà so trực tiếp với 5.98 thì gate **báo oan mọi chữ 6pt trong
+mọi tài liệu LaTeX**. Đây là lỗi đơn vị 0.37%, không phải phát hiện typography.
+
+Verify tại máy:
+```bash
+mutool draw -F trace file.pdf 2>/dev/null | grep -o 'size="[0-9.]*"' | sort -u
+# -> 5.9776, 7.9701, 10.9091, 11.9552 ... (chính là 6/8/10.95/12 TeX pt)
+```
+
+Gate phải quy đổi `to_texpt(size_bp)` trước khi so sánh, và cộng `FONT_EPS = 0.05pt`
+để chữ nằm đúng ngưỡng không bị fail do làm tròn.
+
+## Bẫy 10: cỡ chữ nhỏ trong công thức toán là CHUẨN LaTeX, không phải lỗi
+
+`fontmath.ltx` trên máy (dòng 81-82) quy định:
+
+```latex
+\DeclareMathSizes{\@xipt}{\@xipt}{8}{6}     % 11pt -> script 8pt, scriptscript 6pt
+\DeclareMathSizes{\@xiipt}{\@xiipt}{8}{6}   % 12pt -> script 8pt, scriptscript 6pt
+```
+
+Vậy với bản thảo 11pt/12pt, **scriptscript = 6pt là đúng chuẩn**. Và `\@xipt = 10.95`
+(`latex.ltx` dòng 8913) — "11pt" thật ra là 10.95pt.
+
+Thêm nữa, Computer Modern có **bản vẽ riêng cho từng cỡ** (optical sizing): CMR6
+không phải "CMR10 thu nhỏ" mà là bản vẽ riêng cho 6pt — nét dày hơn, x-height cao
+hơn, counter mở hơn. Nên CMR6 ở 6pt **dễ đọc hơn** CMR10 co xuống 6pt.
+
+Gate phải miễn chữ có cỡ khớp **cỡ thiết kế CM** (5, 6, 7, 8, 9, 10, 10.95, 12,
+14.4, 17.28, 20.74, 24.88) khi chuỗi ngắn như chỉ số.
+
+Verify:
+```bash
+grep -n 'DeclareMathSizes' "$(kpsewhich fontmath.ltx)"
+grep -n '@xipt' "$(kpsewhich latex.ltx)"
+```
+
+## Bẫy 11: font toán mở rộng (CMEX) có bbox sâu gấp nhiều lần cỡ chữ
+
+`(cid:16)` / `(cid:17)` trong font `CMEX10` **không phải glyph lỗi mã hoá**. Verify
+bằng `t1disasm cmex10.pfb`:
+
+```
+dup 16 /parenleftBig put
+dup 17 /parenrightBig put
+```
+
+Đó là dấu ngoặc lớn của `\left( ... \right)`. TFM (`tftopl cmex10.tfm`):
+
+```
+CHARACTER O 20   (CHARWD R 0.597)  (CHARHT R 0.040)  (CHARDP R 1.760)
+```
+
+**Sâu 1.76 lần cỡ chữ dưới baseline.** Bbox của nó bao trọn cả công thức bên trong,
+nên "nhãn chồng nhãn" là **tất nhiên, đúng thiết kế** — không phải lỗi bố cục.
+
+TeX căn dấu ngoặc theo *math axis* (không phải baseline), và `var_delimiter`
+(TeXbook Appendix G, Rule 19) hoặc chọn một biến thể rời rạc, hoặc **xếp chồng nhiều
+glyph** (top/extension/bottom). Vậy một cặp ngoặc có thể ra 2-6 glyph.
+
+Gate phải miễn hoàn toàn font toán mở rộng: `cmex`, `lmex`, `stixsize*`,
+`latinmodernmath`, `xitsmath`, `msam`, `msbm`, và OMX encoding.
+
+Verify:
+```bash
+t1disasm "$(kpsewhich cmex10.pfb)" | grep -n 'parenleftBig'
+tftopl "$(kpsewhich cmex10.tfm)" | grep -A3 'CHARACTER O 20'
+```
+
+## Cơ sở lý thuyết cho G1 (mũi tên xuyên block)
+
+Điểm mạnh nhất để giữ G1 ở mức `error`: trong lý thuyết graph drawing, đây **không
+phải tiêu chí thẩm mỹ** mà là vi phạm **định nghĩa của một bản vẽ**. Định nghĩa
+chuẩn (Di Battista, Eades, Tamassia, Tollis, *Graph Drawing*, Prentice Hall 1999,
+Ch. 1) yêu cầu mỗi cạnh là một cung Jordan giữa hai đỉnh **mà phần trong không chứa
+đỉnh nào**. Cạnh cắt nhau là *chi phí cần tối thiểu hoá*; cạnh xuyên đỉnh thì
+**không hợp lệ ngay từ định nghĩa**.
+
+Hệ quả thực hành: mọi engine layout đều coi đây là ràng buộc cứng. Sugiyama (1981)
+chèn *dummy vertex* cho mọi cạnh vượt tầng chính là để cạnh dài không đi qua node
+thật. Graphviz có `esep`/`sep` (mặc định 3-4pt) làm khoảng hở khi định tuyến.
+
+**Ngoại lệ cần biết** — cạnh chồng node là *hợp lệ* khi:
+1. có quy ước phân biệt tường minh (mask trắng, ngắt đường, z-order);
+2. phần bị chồng **không phải điểm nối** (khung `fit`, vùng bao, nhãn trục);
+3. vị trí node bị ràng buộc từ bên ngoài (bản đồ, floorplan).
+
+Với hình TikZ viết tay thì **không ngoại lệ nào tự động đúng**, nên G1 = `error` là
+hợp lý. Nhưng hình khoa học (hình học phân tử, mạch điện) có thể thuộc ngoại lệ (2):
+cần cách khai báo miễn trừ, không nên sửa hình.
+
+**Điều KHÔNG được nói:** không có thí nghiệm có đối chứng nào đo *mức độ* thiệt hại
+của cạnh-xuyên-node. Purchase (1997, 2002) xếp hạng các tiêu chí thẩm mỹ nhưng
+**không** đưa tiêu chí này vào — vì nó bị loại từ tầng định nghĩa. Đừng viện dẫn
+Purchase để bảo vệ G1.
+
+## Bẫy 12: bbox chồng nhau KHÔNG chứng minh chữ bị chồng
+
+Trong OpenType: `advanceWidth = lsb + inkWidth + rsb`, và **`lsb`/`rsb` được phép
+âm**. Nên:
+
+- bbox advance chồng nhau: bình thường (kerning `AV`, `To`).
+- bbox ink chồng nhau: vẫn có thể bình thường (dấu tổ hợp, dấu tiếng Việt xếp tầng,
+  `\overline`, `\sqrt`, chỉ số trên/dưới).
+
+Chữ Việt xếp 2 tầng dấu (ẩ = a + circumflex + hook) khi ở dạng NFD sẽ ra **glyph có
+advance = 0** nhưng ink khác 0, đặt ngay trên ký tự gốc. Mọi phép so bbox từng cặp
+sẽ báo 2-3 "lỗi" cho **mỗi chữ có dấu**.
+
+Quy tắc: **không bao giờ so bbox trong cùng một nhãn**. Gộp glyph advance = 0 vào
+glyph trước nó, và chỉ so *giữa các nhãn khác nhau*.
