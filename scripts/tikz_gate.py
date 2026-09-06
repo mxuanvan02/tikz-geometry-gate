@@ -82,6 +82,82 @@ SCRIPT_SIZE_RATIO = 0.85  # span nho <= 85% span goc -> coi la sub/superscript
 SUBSCRIPT_FLOOR_RATIO = 0.55  # sub nho hon 55% body font -> teo that, bao loi
 MASK_COVER_RATIO = 0.75  # mask che >=75% dien tich nhan -> coi la co mask
 
+# Kich thuoc trang tai lieu quen biet (pt, sai so +-3pt). Neu trang PDF khop
+# mot trong nhung kich thuoc nay thi font do duoc LA font that ma nguoi doc
+# nhin thay -> so pt tuyet doi co nghia. Nguoc lai (hinh crop standalone) thi
+# chua biet he so thu nho khi nhung, khong the ket luan bang pt tuyet doi.
+PAGE_PRESETS = {
+    "a4": (595.3, 841.9),
+    "a4-landscape": (841.9, 595.3),
+    "letter": (612.0, 792.0),
+    "letter-landscape": (792.0, 612.0),
+    "b5": (498.9, 708.7),
+    # Beamer: kich thuoc doi theo `aspectratio` (1mm = 2.83465pt).
+    # BUG DA GAP: chi khai bao 362.8x204.5 lam slide 16:9 THAT (160x90mm =
+    # 453.5x255.1pt) bi nhan sai la 'standalone' -> moi loi font tren slide
+    # tut xuong warning va bi bo qua.
+    "beamer-4x3": (362.8, 272.1),      # 128 x 96 mm (mac dinh)
+    "beamer-16x9": (453.5, 255.1),     # 160 x 90 mm  (aspectratio=169)
+    "beamer-16x10": (453.5, 283.5),    # 160 x 100 mm (aspectratio=1610)
+    "beamer-14x9": (396.9, 255.1),     # 140 x 90 mm  (aspectratio=149)
+    "beamer-3x2": (382.7, 255.1),      # 135 x 90 mm  (aspectratio=32)
+    "beamer-5x4": (354.3, 283.5),      # 125 x 100 mm (aspectratio=54)
+}
+PAGE_TOL = 3.0
+
+# Kho tham chieu de quy doi san font: A4 rong 595.3pt. San 6pt duoc dinh nghia
+# CHO KHO NAY. Trang hep hon (slide beamer 453.5pt) duoc phong to khi trinh
+# chieu, nen chu 5pt tren slide doc de hon chu 5pt tren giay A4.
+#
+# BUG DA GAP (do anh Van chi ra): ap san 6pt tuyet doi cho slide beamer lam
+# 97 dong bao loi tiny-text tren presentation/pack, gan het la duong tinh gia.
+REFERENCE_PAGE_WIDTH = 595.3
+
+
+def floor_for_page(min_font, page_width, kind):
+    """San font THUC TE cho trang nay, quy doi theo be rong trang.
+
+    'document' -> san ty le theo be rong (slide hep hon A4 thi san thap hon).
+    'standalone' -> giu nguyen san goc; viec quy doi do `scale` lo.
+    """
+    if kind != "document" or not page_width:
+        return float(min_font)
+    return float(min_font) * float(page_width) / REFERENCE_PAGE_WIDTH
+
+# San font 6pt duoc dat cho trang A4. Quy doi sang trang khac theo TY LE be
+# ngang trang: 6pt tren A4 = 6/595.3 = 1.008% be ngang. Cung ty le do tren
+# slide beamer 16:9 (453.5pt) = 4.6pt. Nho vay khong bao oan slide (chu nho
+# hon nhung nguoi xem ngoi xa/chieu to) ma van bat duoc chu teo that.
+A4_WIDTH_PT = 595.3
+
+
+def page_kind(width, height, tol=PAGE_TOL):
+    """Tra ('document', <ten preset>) hoac ('standalone', None).
+
+    'document' = trang tai lieu that (A4/letter/beamer) -> font do duoc la
+    font nguoi doc nhin thay.
+    'standalone' = hinh crop roi (vi du standalone class) -> font do duoc SE
+    bi nhan voi he so thu nho khi \\includegraphics/\\resizebox, nen pt
+    tuyet doi tren hinh roi la VO NGHIA.
+    """
+    for name, (w, h) in PAGE_PRESETS.items():
+        if abs(width - w) <= tol and abs(height - h) <= tol:
+            return "document", name
+    return "standalone", None
+
+
+def relative_font_floor(min_font, page_width, kind):
+    """Quy doi san font sang trang hien tai theo ty le be ngang.
+
+    `min_font` la nguong tham chieu tren A4. Tren trang khac (slide beamer),
+    chu nho hon van doc duoc vi ca trang duoc chieu to len, nen so sanh pt
+    tuyet doi se bao oan. Chi ap quy doi cho trang tai lieu that; hinh
+    standalone khong biet be ngang cuoi cung nen giu nguyen nguong.
+    """
+    if kind != "document" or not page_width:
+        return float(min_font)
+    return float(min_font) * float(page_width) / A4_WIDTH_PT
+
 
 @dataclass
 class Finding:
@@ -601,15 +677,28 @@ def check_bounds(page, elems, spans, margin=0.0):
     return out
 
 
-def check_tiny_text(spans, min_font=MIN_FONT, base_font=None):
-    """G5: chu nho hon san.
+def check_tiny_text(spans, min_font=MIN_FONT, base_font=None,
+                    scale=1.0, kind="document", preset=None,
+                    page_width=None):
+    """G5: chu nho hon san doc duoc — CO TINH HE SO THU NHO.
 
-    Sub/superscript trong cong thuc toan (R_t, B_t, lambda^B) VON DI nho hon
-    body font — do la typography dung, khong phai loi. Chi bao loi khi chu
-    nho hon san MA khong phai sub/superscript, tuc la:
-      - dai hon SUBSCRIPT_MAX_CHARS ky tu, HOAC
-      - nho hon SUBSCRIPT_FLOOR_RATIO lan body font (teo qua muc, thuong do
-        \resizebox lam co ca hinh).
+    BAY DA DO BANG SO THAT: cung mot hinh arch_diagram, font nho nhat do tren
+    hinh ROI la 4.98pt, nhung khi nhung vao trang A4 (qua \\resizebox) chi con
+    2.67pt (ty le 0.536). Vay so pt do tren hinh crop standalone KHONG PHAI
+    font nguoi doc nhin thay. Ap san 6pt tuyet doi len hinh roi vua bao sai
+    (hinh roi 6.5pt -> that ra 3.5pt, bo sot) vua bao oan (slide beamer chu
+    5pt nhung chieu len man hinh van doc duoc).
+
+    Quy tac:
+      - kind='document' (trang khop A4/letter/beamer): font do duoc LA font
+        that -> so sanh truc tiep voi min_font, severity=error.
+      - kind='standalone' + biet `scale` (nguoi dung truyen --scale): quy doi
+        font_that = size * scale roi moi so sanh, severity=error.
+      - kind='standalone' + KHONG biet scale: khong the ket luan -> tra
+        severity='warning' kem canh bao, exit code khong fail (tru --strict).
+
+    Sub/superscript (R_t, B_t, lambda^B) von di nho hon body font — typography
+    dung, khong phai loi. Loc bang SUBSCRIPT_MAX_CHARS + SUBSCRIPT_FLOOR_RATIO.
     """
     out = []
     sizes = [sp["size"] for sp in spans if sp["size"] > 0]
@@ -623,22 +712,46 @@ def check_tiny_text(spans, min_font=MIN_FONT, base_font=None):
         else:
             base_font = min_font
     hard_floor = base_font * SUBSCRIPT_FLOOR_RATIO
+
+    unknown_scale = (kind == "standalone" and scale == 1.0)
+    severity = "warning" if unknown_scale else "error"
+
+    # San quy doi theo be rong trang: slide beamer hep hon A4 nen san thap hon.
+    floor = floor_for_page(min_font, page_width, kind)
+
     for i, sp in enumerate(spans):
-        if sp["size"] >= min_font:
+        effective = sp["size"] * scale
+        if effective >= floor:
             continue
         txt = sp["text"].strip()
-        is_script = (len(txt) <= SUBSCRIPT_MAX_CHARS
-                     and sp["size"] >= hard_floor)
-        if is_script:
+        # sub/superscript: so tren size GOC (ty le noi bo hinh), khong scale
+        if len(txt) <= SUBSCRIPT_MAX_CHARS and sp["size"] >= hard_floor:
             continue
+        if unknown_scale:
+            msg = (f"chu {sp['text'][:24]!r} do duoc {sp['size']:.2f}pt tren "
+                   f"hinh roi; CHUA BIET he so thu nho khi nhung nen chua ket "
+                   f"luan — chay lai voi --scale <he so> hoac gate tren trang "
+                   f"tai lieu da build")
+        else:
+            msg = (f"chu {sp['text'][:24]!r} chi {effective:.2f}pt"
+                   + (f" (do {sp['size']:.2f}pt x scale {scale:g})"
+                      if scale != 1.0 else "")
+                   + f", duoi san {floor:.2f}pt"
+                   + (f" (san {min_font:.1f}pt quy doi cho trang rong "
+                      f"{page_width:.0f}pt)" if abs(floor - min_font) > 0.05
+                      else ""))
         out.append(Finding(
-            "G5/tiny-text", "error",
-            f"chu {sp['text'][:28]!r} chi {sp['size']:.2f}pt, duoi san "
-            f"{min_font:.1f}pt",
+            "G5/tiny-text", severity, msg,
             {"spanIndex": i, "text": sp["text"], "sizePt": _r(sp["size"], 2),
-             "minimumPt": min_font, "bbox": sp["bbox"]},
-            ["tang font trong hinh", "bo \\resizebox, dung tikzscale",
-             "chia hinh thanh nhieu panel"]))
+             "effectivePt": _r(effective, 2), "scale": scale,
+             "pageKind": kind, "pagePreset": preset,
+             "minimumPt": min_font, "effectiveFloorPt": _r(floor, 2),
+             "pageWidthPt": _r(page_width or 0, 1),
+             "bbox": sp["bbox"], "scaleKnown": not unknown_scale},
+            ["chay gate tren trang tai lieu da build (chinh xac nhat)",
+             "truyen --scale <he so \\resizebox/\\includegraphics>",
+             "tang font trong hinh",
+             "bo \\resizebox, dung tikzscale de chu khong teo"]))
     return out
 
 
@@ -745,11 +858,14 @@ def _open_page(pdf_path, page_no):
 
 
 def analyze(pdf_path, page_no=0, min_font=MIN_FONT, eps=ENDPOINT_EPS,
-            margin=0.0, block_min_area=BLOCK_MIN_AREA):
+            margin=0.0, block_min_area=BLOCK_MIN_AREA, scale=1.0):
     page, page_holder, close = _open_page(pdf_path, page_no)
     blocks, boundaries, edges, heads, masks = classify(
         page, block_min_area=block_min_area)
     spans = text_spans(page)
+
+    pr = page_holder.rect
+    kind, preset = page_kind(pr.width, pr.height)
 
     findings = []
     findings += check_edge_through_block(edges, blocks, eps=eps)
@@ -757,16 +873,20 @@ def analyze(pdf_path, page_no=0, min_font=MIN_FONT, eps=ENDPOINT_EPS,
     findings += check_label_label(spans)
     findings += check_bounds(page_holder, blocks + boundaries + edges, spans,
                              margin=margin)
-    findings += check_tiny_text(spans, min_font=min_font)
+    findings += check_tiny_text(spans, min_font=min_font, scale=scale,
+                                kind=kind, preset=preset,
+                                page_width=pr.width)
     findings += check_label_edge(spans, edges, masks)
 
-    pr = page_holder.rect
     inventory = {
         "blocks": len(blocks), "boundaries": len(boundaries),
         "edges": len(edges), "arrowheads": len(heads),
         "masks": len(masks), "labels": len(spans),
         "pageWidthPt": _r(pr.width), "pageHeightPt": _r(pr.height),
+        "pageKind": kind, "pagePreset": preset, "scale": scale,
         "minFontPt": _r(min(([s["size"] for s in spans] or [0])), 2),
+        "effectiveMinFontPt": _r(min(([s["size"] for s in spans] or [0])) * scale, 2),
+        "fontFloorPt": _r(floor_for_page(min_font, pr.width, kind), 2),
     }
     close()
     return findings, inventory, (blocks, boundaries, edges, spans)
@@ -869,13 +989,36 @@ def main(argv=None):
     ap.add_argument("--block-min-area", type=float, default=BLOCK_MIN_AREA)
     ap.add_argument("--page", type=int, default=0)
     ap.add_argument("--annotate", default=None)
+    ap.add_argument("--scale", type=float, default=1.0,
+                    help="he so thu nho khi nhung hinh (vi du 0.46 cho "
+                         "\\resizebox{0.46\\linewidth}); mac dinh 1.0")
+    ap.add_argument("--strict", action="store_true",
+                    help="coi warning la loi (exit 1)")
     args = ap.parse_args(argv)
+
+    # Validate tham so TRUOC khi mo PDF: sai tham so la loi DUNG TOOL (exit 2),
+    # khong phai "hinh co loi" (exit 1). Lan lon hai thu nay lam CI bao sai.
+    if not (0.0 < args.scale <= 100.0):
+        print(json.dumps({"ok": False, "stage": "args",
+                          "error": f"--scale phai trong khoang (0, 100], nhan duoc {args.scale!r}"},
+                         ensure_ascii=False))
+        return 2
+    if args.min_font <= 0:
+        print(json.dumps({"ok": False, "stage": "args",
+                          "error": f"--min-font phai > 0, nhan duoc {args.min_font!r}"},
+                         ensure_ascii=False))
+        return 2
+    if args.page < 0:
+        print(json.dumps({"ok": False, "stage": "args",
+                          "error": f"--page phai >= 0, nhan duoc {args.page!r}"},
+                         ensure_ascii=False))
+        return 2
 
     try:
         findings, inventory, _ = analyze(
             args.pdf, page_no=args.page, min_font=args.min_font,
             eps=args.eps, margin=args.margin,
-            block_min_area=args.block_min_area)
+            block_min_area=args.block_min_area, scale=args.scale)
     except Exception as exc:
         print(json.dumps({"ok": False, "stage": "analyze",
                           "error": str(exc)}, ensure_ascii=False))
@@ -886,6 +1029,10 @@ def main(argv=None):
         png = annotate(args.pdf, args.annotate, findings, page_no=args.page)
 
     errors = [f for f in findings if f.severity == "error"]
+    warnings = [f for f in findings if f.severity == "warning"]
+    if args.strict:
+        errors = errors + warnings
+        warnings = []
     ok = not errors
     report = {
         "schemaVersion": 1,
@@ -895,6 +1042,7 @@ def main(argv=None):
         "page": args.page,
         "inventory": inventory,
         "errorCount": len(errors),
+        "warningCount": len(warnings),
         "findings": [asdict(f) for f in findings],
         "annotated": png,
     }

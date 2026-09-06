@@ -445,5 +445,129 @@ class TestAnnotateWithoutPyMuPDF(unittest.TestCase):
         out.unlink()
 
 
+
+class TestPageKindDetection(unittest.TestCase):
+    """Phan biet trang tai lieu that vs hinh crop roi."""
+
+    def test_a4_is_document(self):
+        kind, preset = G.page_kind(595.3, 841.9)
+        self.assertEqual(kind, "document")
+        self.assertEqual(preset, "a4")
+
+    def test_letter_is_document(self):
+        kind, preset = G.page_kind(612.0, 792.0)
+        self.assertEqual(kind, "document")
+        self.assertEqual(preset, "letter")
+
+    def test_beamer_16x9_is_document(self):
+        """REGRESSION: so THAT do tu `\\documentclass[aspectratio=169]{beamer}`.
+
+        Bug da gap: preset ghi 362.8x204.5 (doan sai) nen slide 16:9 that
+        (160x90mm = 453.5x255.1pt) bi nhan la 'standalone' -> moi loi font
+        tren slide tut xuong warning va bi bo qua.
+        """
+        kind, preset = G.page_kind(453.5, 255.1)
+        self.assertEqual(kind, "document")
+        self.assertEqual(preset, "beamer-16x9")
+
+    def test_beamer_4x3_is_document(self):
+        """So THAT do tu beamer mac dinh (128x96mm)."""
+        kind, preset = G.page_kind(362.8, 272.1)
+        self.assertEqual(kind, "document")
+        self.assertEqual(preset, "beamer-4x3")
+
+    def test_old_wrong_beamer_size_is_not_a_preset(self):
+        """362.8x204.5 la so SAI cu — khong duoc coi la preset nao."""
+        kind, preset = G.page_kind(362.8, 204.5)
+        self.assertEqual(kind, "standalone")
+        self.assertIsNone(preset)
+
+    def test_cropped_figure_is_standalone(self):
+        """Hinh standalone crop sat noi dung -> khong khop preset nao."""
+        kind, preset = G.page_kind(466.8, 267.4)
+        self.assertEqual(kind, "standalone")
+        self.assertIsNone(preset)
+
+    def test_tolerance_absorbs_rounding(self):
+        kind, preset = G.page_kind(595.0, 842.0)
+        self.assertEqual(kind, "document")
+
+
+class TestG5ScaleAware(unittest.TestCase):
+    """REGRESSION: font do tren hinh ROI khong phai font nguoi doc nhin thay.
+
+    Do bang so that: arch_diagram font min 4.98pt tren hinh roi, nhung chi
+    2.67pt khi nhung vao A4 (ty le 0.536).
+    """
+
+    def test_standalone_unknown_scale_is_warning_not_error(self):
+        """Chua biet he so thu nho -> canh bao, KHONG ket luan la loi."""
+        sp = mk_span("nhan dai khong phai chi so", 10, 10, 90, 16, size=5.0)
+        out = G.check_tiny_text([sp], min_font=6.0, base_font=10.0,
+                                scale=1.0, kind="standalone")
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0].severity, "warning")
+        self.assertFalse(out[0].evidence["scaleKnown"])
+
+    def test_document_page_is_error(self):
+        """Trang tai lieu that -> font do duoc la font that -> loi."""
+        sp = mk_span("nhan dai khong phai chi so", 10, 10, 90, 16, size=5.0)
+        out = G.check_tiny_text([sp], min_font=6.0, base_font=10.0,
+                                scale=1.0, kind="document", preset="a4")
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0].severity, "error")
+
+    def test_scale_shrinks_effective_font_into_error(self):
+        """8.97pt x 0.536 = 4.81pt < san 6pt -> loi that."""
+        sp = mk_span("Greenhouse", 10, 10, 90, 20, size=8.97)
+        out = G.check_tiny_text([sp], min_font=6.0, base_font=8.97,
+                                scale=0.536, kind="standalone")
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0].severity, "error")
+        self.assertAlmostEqual(out[0].evidence["effectivePt"], 4.81, places=1)
+        self.assertTrue(out[0].evidence["scaleKnown"])
+
+    def test_scale_up_keeps_readable_font_clean(self):
+        """Hinh ve nho roi phong to len -> khong phai loi."""
+        sp = mk_span("Greenhouse", 10, 10, 90, 20, size=4.0)
+        out = G.check_tiny_text([sp], min_font=6.0, base_font=4.0,
+                                scale=2.0, kind="standalone")
+        self.assertEqual(out, [])
+
+    def test_subscript_judged_on_intrinsic_size_not_scaled(self):
+        """Sub/superscript loc theo ty le NOI BO hinh, khong theo scale."""
+        sub = mk_span("t", 10, 10, 14, 16, size=5.98)
+        out = G.check_tiny_text([sub], min_font=6.0, base_font=8.97,
+                                scale=0.536, kind="standalone")
+        self.assertEqual(out, [], "chi so nho la typography dung")
+
+
+class TestCliScaleFlag(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.pdf = build_fixture("defect-rabs.tex")
+
+    def _run(self, *args):
+        return subprocess.run(
+            [sys.executable, str(REPO / "scripts" / "tikz_gate.py"), *args],
+            capture_output=True, text=True)
+
+    def test_scale_flag_changes_verdict(self):
+        """--scale phai lam thay doi so luong G5 tim duoc."""
+        a = json.loads(self._run(str(self.pdf), "--json").stdout)
+        b = json.loads(self._run(str(self.pdf), "--json", "--scale", "0.5").stdout)
+        na = sum(1 for f in a["findings"] if f["code"] == "G5/tiny-text")
+        nb = sum(1 for f in b["findings"] if f["code"] == "G5/tiny-text")
+        self.assertGreater(nb, na, "thu nho 0.5 phai lo ra nhieu chu qua nho")
+
+    def test_report_carries_page_kind(self):
+        d = json.loads(self._run(str(self.pdf), "--json").stdout)
+        self.assertIn("pageKind", d["inventory"])
+        self.assertIn("warningCount", d)
+
+    def test_rejects_bad_scale(self):
+        r = self._run(str(self.pdf), "--json", "--scale", "0")
+        self.assertEqual(r.returncode, 2)
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

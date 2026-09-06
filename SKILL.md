@@ -37,7 +37,9 @@ Exit code: `0` pass, `1` có lỗi, `2` lỗi dùng tool.
 
 Biến môi trường: `TIKZGATE_PDF_BACKEND=pymupdf` để đổi backend.
 
-Tuỳ chọn: `--min-font 6` (sàn chữ, pt), `--eps 6` (bán kính bỏ qua quanh đầu mút), `--page 0`, `--strict` (coi warning là lỗi).
+Tuỳ chọn: `--min-font 6` (sàn chữ, pt), `--scale 0.46` (hệ số `\resizebox`/`\includegraphics` khi nhúng hình rời), `--eps 6` (bán kính bỏ qua quanh đầu mút), `--page 0`, `--strict` (coi warning là lỗi).
+
+Gate tự nhận khổ trang: `pageKind=document` (khớp A4/letter/beamer → font đo được là font thật) hoặc `pageKind=standalone` (hình crop rời → cần `--scale` mới kết luận được về font).
 
 ## Sáu nhóm check
 
@@ -108,6 +110,16 @@ Nếu chỉ viết `gap <= ngưỡng` thì char của nhãn thứ hai (x0 nhảy
 hai nhãn chồng nhau bị gộp thành một span và lỗi biến mất. Đây là bug đã làm gate bỏ
 sót 5 lỗi G3 + 2 lỗi G6 trên fixture `bad.tex`.
 
+**7. Số pt đo trên hình rời KHÔNG phải font người đọc thấy.** Đo bằng số thật: cùng hình `arch_diagram`, font nhỏ nhất trên hình standalone là **4.98pt**, nhưng khi nhúng vào trang A4 qua `\resizebox{0.46\linewidth}` chỉ còn **2.67pt** (tỉ lệ 0.536). Áp sàn 6pt tuyệt đối lên hình rời vừa bỏ sót (hình rời 6.5pt → thật ra 3.5pt) vừa báo oan. Quy tắc hiện tại:
+
+- trang khớp preset (A4/letter/beamer) → `kind=document`, font đo được là font thật → `severity=error`;
+- hình rời + biết `--scale` → quy đổi `font_thật = size × scale` → `severity=error`;
+- hình rời + **không** biết scale → `severity=warning`, không fail (trừ `--strict`).
+
+Chính xác nhất: chạy gate trên **trang tài liệu đã build**, không phải trên hình crop.
+
+**8. Preset khổ trang phải lấy từ số thật, không từ ký ức.** Beamer đổi kích thước theo `aspectratio`: 16:9 là **453.5×255.1pt** (160×90mm), 4:3 là **362.8×272.1pt** (128×96mm). Khai sai một preset làm slide thật bị nhận là `standalone` → mọi lỗi font trên slide tụt xuống warning và bị bỏ qua âm thầm. Kiểm bằng cách compile `\documentclass[aspectratio=169]{beamer}` rồi `pdfinfo`.
+
 ## Khi heuristic G1 sai
 
 Nếu hình có node lồng nhau phức tạp và G1 báo quá nhiều dương tính giả, xuất ground truth từ TikZ thay vì đoán:
@@ -131,7 +143,7 @@ Cần 2 lượt compile. Chỉ làm khi heuristic thất bại — đừng làm 
 python -m unittest discover -s test -t . -v
 ```
 
-37 test, gồm test hồi quy cho bug thứ tự vẽ và test parity giữa hai backend. Fixture PDF được dựng từ `.tex` trong `fixtures/` nên repo chạy được trên máy sạch (chỉ cần `pdflatex` + tikz).
+52 test, gồm test hồi quy cho bug thứ tự vẽ và test parity giữa hai backend. Fixture PDF được dựng từ `.tex` trong `fixtures/` nên repo chạy được trên máy sạch (chỉ cần `pdflatex` + tikz).
 
 ## Phụ thuộc và backend
 
