@@ -278,6 +278,14 @@ tương đối giữa mask và edge. Mất zorder là mất luôn check G6 mask 
 4. Xuất `--annotate` và soi bằng mắt. Gate chỉ chứng minh hình học; thẩm mỹ vẫn cần người xem.
 5. Kiểm `pdfimages -list` trống (vector thuần) và `pdffonts` nhúng đủ.
 
+## "0 finding" chưa phải bằng chứng — phải chạy negative control
+
+Một check im lặng có hai nguyên nhân không phân biệt được từ báo cáo: **hình sạch**, hoặc **check không chạy / không có dữ kiện**. Hai nguyên nhân này cho cùng một output nhưng giá trị ngược nhau, nên không được suy ra kết luận nào từ `0 finding` khi chưa đo.
+
+Cách phân biệt: đếm **dữ kiện đầu vào** của từng check, rồi với mỗi ứng viên bị loại, in ra *điều kiện nào* đã loại nó. Quy trình đầy đủ, kèm số đo thật trên hình của dự án và hai lỗi hạ tầng mà nó phát hiện, nằm ở [references/negative-control-real-figures.md](references/negative-control-real-figures.md).
+
+Bài học đắt nhất từ lần chạy đó: probe ban đầu chạy trên **bản cài chưa được sync**, tức gate 7 check cũ. Nó báo `0 finding` cho G8/G9 — hai check *không tồn tại trong file đang chạy*. Kết luận "hình sạch" khi ấy hoàn toàn vô giá trị. Trước khi tin bất kỳ kết quả scan nào, đối chiếu `sha256` của `scripts/tikz_gate.py` giữa clone và bản cài, và kiểm `--list-checks` trả về đủ số check mong đợi.
+
 ## Bẫy 9: PDF ghi cỡ chữ theo BIG POINT, TeX dùng PRINTER POINT
 
 **Đã verify tại máy, không phải suy đoán.** PDF ghi toán hạng `Tf` theo **big point**

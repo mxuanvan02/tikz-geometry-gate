@@ -1521,5 +1521,104 @@ class TestCrashedCheckIsIsolated(unittest.TestCase):
         self.assertIn("loi co y de test", crashed[0].message)
 
 
+class TestVerifyInstall(unittest.TestCase):
+    """Script doi chieu clone <-> ban cai: glob, hop hai ben, hanh vi.
+
+    Ly do co test nay: mot lan scan '0 finding G8/G9' duoc suy ra tu ban cai
+    chua sync. Danh sach cung TRACKED vua miss references/*.md. Glob + hop
+    hai ben la hop dong: them file dung cho, script tu bat; file chi co o mot
+    ben phai bi bao thieu, khong duoc bo qua.
+    """
+
+    def setUp(self):
+        import tempfile
+        import shutil
+        self._tmp = Path(tempfile.mkdtemp(prefix="tikzgate-verify-"))
+        self.addCleanup(shutil.rmtree, self._tmp, ignore_errors=True)
+        self.clone = self._tmp / "clone"
+        self.install = self._tmp / "install"
+        self.clone.mkdir()
+        self.install.mkdir()
+        # Ban toi thieu de --list-checks chay duoc: copy gate that.
+        gate_src = REPO / "scripts" / "tikz_gate.py"
+        (self.clone / "scripts").mkdir()
+        (self.install / "scripts").mkdir()
+        (self.clone / "scripts" / "tikz_gate.py").write_bytes(gate_src.read_bytes())
+        (self.install / "scripts" / "tikz_gate.py").write_bytes(gate_src.read_bytes())
+
+    def _run(self, *extra):
+        return subprocess.run(
+            [sys.executable, str(REPO / "scripts" / "verify_install.py"),
+             str(self.clone), str(self.install), *extra],
+            capture_output=True, text=True)
+
+    def test_identical_trees_pass(self):
+        r = self._run()
+        data = json.loads(r.stdout)
+        self.assertEqual(r.returncode, 0, r.stdout[:400])
+        self.assertTrue(data["ok"])
+        self.assertEqual(data["checksClone"], data["checksInstall"])
+        self.assertGreaterEqual(len(data["checksClone"]), 9)
+
+    def test_missing_in_install_fails(self):
+        """REGRESSION: file moi o clone chua dua sang phai bi bat."""
+        (self.clone / "references").mkdir()
+        (self.clone / "references" / "new.md").write_text("# moi")
+        r = self._run()
+        data = json.loads(r.stdout)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("references/new.md", data["missingInInstall"])
+
+    def test_missing_in_clone_fails(self):
+        """REGRESSION: file chi co o ban cai (nhu references/ truoc khi
+        commit) phai bi bat, khong duoc bo qua vi glob chi lay tu clone."""
+        (self.install / "references").mkdir()
+        (self.install / "references" / "only-install.md").write_text("# chi o cai")
+        r = self._run()
+        data = json.loads(r.stdout)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("references/only-install.md", data["missingInClone"])
+
+    def test_sha_mismatch_fails(self):
+        (self.clone / "SKILL.md").write_text("a")
+        (self.install / "SKILL.md").write_text("b")
+        r = self._run()
+        data = json.loads(r.stdout)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("SKILL.md", data["shaMismatch"])
+
+    def test_build_artifacts_are_ignored(self):
+        """fixtures/_build va __pycache__ KHONG nam trong hop dong glob."""
+        (self.clone / "fixtures").mkdir()
+        (self.clone / "fixtures" / "_build").mkdir()
+        (self.clone / "fixtures" / "_build" / "x.pdf").write_bytes(b"%PDF")
+        (self.clone / "scripts" / "__pycache__").mkdir()
+        (self.clone / "scripts" / "__pycache__" / "x.pyc").write_bytes(b"x")
+        r = self._run()
+        data = json.loads(r.stdout)
+        self.assertEqual(r.returncode, 0, r.stdout[:400])
+        leaked = [p for p in (data["missingInInstall"] + data["shaMismatch"])
+                  if "_build" in p or "__pycache__" in p]
+        self.assertEqual(leaked, [])
+
+    def test_missing_directory_exits_2(self):
+        r = subprocess.run(
+            [sys.executable, str(REPO / "scripts" / "verify_install.py"),
+             str(self.clone), str(self._tmp / "khong-co")],
+            capture_output=True, text=True)
+        self.assertEqual(r.returncode, 2)
+        self.assertEqual(json.loads(r.stdout)["stage"], "args")
+
+    def test_tracked_relpaths_picks_up_new_fixture_automatically(self):
+        """Them file dung cho (fixtures/*.tex) -> glob tu bat, khong sua script."""
+        import verify_install as V
+        (self.clone / "fixtures").mkdir()
+        (self.clone / "fixtures" / "brand-new.tex").write_text("% moi")
+        rels = V.tracked_relpaths(self.clone)
+        self.assertIn("fixtures/brand-new.tex", rels)
+        self.assertIn("scripts/tikz_gate.py", rels)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
