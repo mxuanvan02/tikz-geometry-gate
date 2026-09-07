@@ -35,7 +35,7 @@ python scripts/tikz_gate.py figure.pdf --json --annotate loi.png   # khoanh đ�
 
 Exit: `0` pass, `1` có lỗi, `2` lỗi dùng tool.
 
-## Tám nhóm check
+## Chín nhóm check
 
 | Mã | Bắt gì |
 |---|---|
@@ -47,6 +47,19 @@ Exit: `0` pass, `1` có lỗi, `2` lỗi dùng tool.
 | `G6/label-edge-clash` | nhãn bị đường đi xuyên qua, không có mask che |
 | `G7/edge-edge-overlap` | hai mũi tên chạy trùng/song song sát nhau trên đoạn dài |
 | `G8/edge-border-run` | mũi tên chạy dọc viền khung bao (`\node[fit=…]`), hoà vào viền nhóm |
+| `G9/route-micro-step` | bậc thang tí hon giữa hai đoạn dài (trông như lỗi render) |
+| `G9/route-axis-jitter` | route định là vuông góc nhưng một đoạn lệch vài phần độ |
+
+## Chọn check và ngưỡng
+
+```bash
+python scripts/tikz_gate.py --list-checks               # danh sách check + tên ngưỡng
+python scripts/tikz_gate.py fig.pdf --only G1,G8        # chỉ chạy hai check
+python scripts/tikz_gate.py fig.pdf --skip G5
+python scripts/tikz_gate.py fig.pdf --config nguong.json
+```
+
+`--config` nhận object phẳng `{tên: số > 0}`. Khoá sai hoặc giá trị không hợp lệ → **exit 2**, không im lặng bỏ qua.
 
 ## Output
 

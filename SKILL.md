@@ -41,11 +41,11 @@ Tuỳ chọn: `--min-font 6` (sàn chữ, pt), `--scale 0.46` (hệ số `\resiz
 
 Gate tự nhận khổ trang: `pageKind=document` (khớp A4/letter/beamer → font đo được là font thật) hoặc `pageKind=standalone` (hình crop rời → cần `--scale` mới kết luận được về font).
 
-## Tám nhóm check
+## Chín nhóm check
 
 | Mã | Bắt gì |
 |---|---|
-| `G1/edge-through-block` | mũi tên xuyên/đè block không phải đầu mút |
+| `G1/edge-through-block` | mũi tên xuyên/đè block không phải đầu mút (miễn khung bao) |
 | `G2/label-block-straddle` | nhãn chồng viền block (một phần trong, một phần ngoài) |
 | `G3/label-label-overlap` | hai nhãn chồng nhau |
 | `G4/out-of-bounds` | phần tử tràn khỏi trang |
@@ -53,6 +53,26 @@ Gate tự nhận khổ trang: `pageKind=document` (khớp A4/letter/beamer → f
 | `G6/label-edge-clash` | nhãn bị đường đi xuyên qua, không có mask che |
 | `G7/edge-edge-overlap` | hai mũi tên chạy trùng/song song sát nhau trên đoạn dài |
 | `G8/edge-border-run` | mũi tên chạy dọc viền khung bao (`\node[fit=…]`), hoà vào viền nhóm |
+| `G9/route-micro-step` | bậc thang tí hon giữa hai đoạn dài (trông như lỗi render) |
+| `G9/route-axis-jitter` | route định là vuông góc nhưng một đoạn lệch vài phần độ |
+
+Danh sách check và tên mọi ngưỡng lấy được bằng máy:
+
+```bash
+python scripts/tikz_gate.py --list-checks    # không cần PDF
+```
+
+Chọn check và nới/siết ngưỡng mà không phải sửa code:
+
+```bash
+python scripts/tikz_gate.py fig.pdf --only G1,G8        # chỉ chạy hai check
+python scripts/tikz_gate.py fig.pdf --skip G5           # bỏ qua sàn chữ
+python scripts/tikz_gate.py fig.pdf --config nguong.json
+```
+
+`nguong.json` là object phẳng `{tên: số > 0}`, dùng đúng tên mà `--list-checks` in ra. Khoá viết sai hoặc giá trị không hợp lệ làm gate **exit 2** (lỗi dùng tool) chứ không im lặng bỏ qua — một khoá gõ sai mà vẫn exit 0 sẽ làm người dùng tin là ngưỡng đã đổi.
+
+Thêm check mới chỉ cần một dòng trong registry `CHECKS` của `tikz_gate.py`, không sửa `analyze()`. Dữ kiện đắt tiền (khung bao, vùng hình, tập gạch typography) nằm trong `Ctx` và tính một lần. Một check hỏng không làm chết cả gate: nó thành finding `Gn/check-crashed` mức `warning`, tám check còn lại vẫn chạy và kết quả vẫn dùng được.
 
 ## Nguyên lý G1 (quan trọng nhất)
 
@@ -69,6 +89,32 @@ Heuristic trên **sai** với khung nhóm (`\node[fit=…]` + thư viện `backg
 `container_indices()` nhận diện khung bao bằng **cấu trúc**: một hình là khung bao khi *tâm* của hình khác nằm trong lòng nó. Không dùng ngưỡng diện tích — sơ đồ có một node đơn lẻ rất to sẽ bị coi oan là khung bao, và G8 sẽ báo sai mọi mũi tên chạm vào node đó. Không dùng phần giao diện tích — hai block cạnh nhau có thể chạm viền nhau do làm tròn góc, nhưng tâm thì không bao giờ nằm trong nhau.
 
 Khung bao có check riêng là **G8**, đúng bản chất hơn: vấn đề của khung nhóm không phải bị xuyên qua, mà là *bị hoà vào viền*.
+
+## Nguyên lý G9: vì sao không ngưỡng đơn lẻ nào dùng được
+
+Đây là chỗ dễ làm sai nhất trong gate, nên số đo được ghi lại đầy đủ. Đo trên `fixtures/route-rhythm.pdf`, sáu ca (hai lỗi, bốn hợp lệ):
+
+| Ca | Độ dài các đoạn | Góc rẽ có dấu | Lệch trục | Offset | Kết luận |
+|---|---|---|---|---|---|
+| 1 bậc thang | `[85.0, 2.0, 80.4]` | `[+90, −90]` | 0° | 0pt | **lỗi** |
+| 2 jitter | `[85.0, 23.7]` | `[+88.8]` | 1.209° | 0.5pt | **lỗi** |
+| 3 `bend left` | `[166.2]` | — | 0.931° | 2.7pt | hợp lệ |
+| 4 `rounded corners` | `[79.0, 8.49, 22.0, 8.49, 74.4]` | `[+45, +45, −45, −45]` | 45° | 6pt | hợp lệ |
+| 5 đoạn ngắn ở đầu | `[2.0, 163.4]` | `[0]` | 0° | 0pt | hợp lệ |
+| 6 rẽ thường | `[85.0, 34.0, 80.4]` | `[+90, −90]` | 0° | 0pt | hợp lệ |
+
+Ba kết luận rút ra, mỗi cái giết một tiêu chí trông có lý:
+
+1. **Dấu góc rẽ một mình không đủ.** Ca 1 (lỗi) và ca 6 (hợp lệ) có góc rẽ *giống hệt* `[+90, −90]`. Khác biệt duy nhất là độ dài đoạn giữa.
+2. **Độ dài một mình không đủ.** Ca 4 hợp lệ nhưng có đoạn giữa 8.49pt, ngắn hơn nhiều ngưỡng hợp lý. Đó là dây cung của góc bo — và bo góc mặc định của TikZ (4pt) cho dây cung 5.66pt, còn thấp hơn nữa.
+3. **Không ngưỡng lệch trục tuyệt đối nào dùng được.** Ca 3 hợp lệ lệch *ít hơn* ca 2 là lỗi (0.931° so với 1.209°) nhưng offset *lớn hơn gấp năm* (2.7pt so với 0.5pt). Cả hai chiều đều ngược nhau.
+
+Nên tiêu chí là **giao của nhiều điều kiện**, và suy ý định từ chính route:
+
+- `route-micro-step`: đoạn giữa ngắn **và** hai góc rẽ hai bên đủ sắc **và** trái dấu **và** hai đoạn kề dài gấp ≥4 lần đoạn giữa. Điều kiện dấu tách bo góc (cùng dấu) khỏi bậc thang (trái dấu); điều kiện tỉ lệ loại đường Bézier bị làm phẳng, vì trên đường cong các đoạn liên tiếp dài xấp xỉ nhau chứ không có tỉ lệ 42:1 như bậc thang thật.
+- `route-axis-jitter`: chỉ báo khi route **đã tự chứng tỏ** nó vuông góc — có ít nhất một đoạn trùng trục chính xác (≤0.25°) — và đoạn lệch nằm kề một đoạn chính xác như vậy. Đường cong không thoả vì mọi đoạn của nó đều lệch.
+
+Hệ quả cần giữ: không được thêm tiêu chí "mọi đoạn phải vuông góc" kiểu `orthogonal_arrows` của archify. Hình khoa học dùng đường chéo và Bézier hợp lệ, nhập tiêu chí đó vào sẽ báo sai hàng loạt trên đúng loại hình gate phục vụ.
 
 ## Phân loại phần tử từ PDF
 
