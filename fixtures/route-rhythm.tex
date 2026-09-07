@@ -1,0 +1,44 @@
+% Fixture G9: nhip duong di (route rhythm).
+%
+% CA LOI:
+%   1. doan CUC NGAN o GIUA route (short-interior-segment) — bac thang 2pt,
+%      nhin nhu loi render.
+%   2. GAP KHUC GAN THANG (jitter-bend) — toa do viet tay lech nhe:
+%      (x,0) -- (x+0.02,-1) tao mot goc 1 do, khong ai co y ve nhu vay.
+%
+% CA HOP LE — PHAI KHONG bao loi:
+%   3. duong cong `bend left` (Bezier): diem control co the gan nhau, nhung day
+%      la duong cong CO Y.
+%   4. `rounded corners`: goc bo tron sinh cung ngan, la thu phap binh thuong.
+%   5. doan ngan o DAU/CUOI route (micro-segment o dau mut) — thuong la phan
+%      noi vao vien node, nhe hon loi o giua.
+%   6. route vuong goc binh thuong, moi doan du dai.
+\documentclass[border=6pt]{standalone}
+\usepackage{tikz}
+\usetikzlibrary{positioning}
+\begin{document}
+\begin{tikzpicture}[>=latex, font=\sffamily\small, thick]
+
+  % ============ CA 1: doan cuc ngan o GIUA route (LOI) ============
+  % Bac thang 2pt giua hai doan dai: nhin nhu loi render.
+  \draw[->] (0,0) -- (3,0) -- (3,-0.07) -- (6,-0.07);
+
+  % ============ CA 2: gap khuc gan thang (LOI) ============
+  % Lech 0.02cm tren doan 1cm => goc ~1 do. Khong phai y do thiet ke.
+  \draw[->] (0,-1.5) -- (3,-1.5) -- (3.02,-2.5);
+
+  % ============ CA 3: duong cong bend (HOP LE) ============
+  \draw[->] (0,-3.5) to[bend left=35] (6,-3.5);
+
+  % ============ CA 4: rounded corners (HOP LE) ============
+  \draw[->, rounded corners=6pt] (0,-5) -- (3,-5) -- (3,-6.2) -- (6,-6.2);
+
+  % ============ CA 5: doan ngan o DAU route (HOP LE) ============
+  % Doan 2pt o dau la phan noi ra khoi vien node.
+  \draw[->] (0,-7.5) -- (0.07,-7.5) -- (6,-7.5);
+
+  % ============ CA 6: route vuong goc binh thuong (HOP LE) ============
+  \draw[->] (0,-9) -- (3,-9) -- (3,-10.2) -- (6,-10.2);
+
+\end{tikzpicture}
+\end{document}

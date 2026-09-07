@@ -1043,6 +1043,26 @@ class TestG8RealFixture(unittest.TestCase):
         g1 = [f for f in findings if f.code == "G1/edge-through-block"]
         self.assertEqual(g1, [], "khung nhom khong duoc bao G1")
 
+    def test_g9_also_flags_the_wobbly_segment_and_that_is_correct(self):
+        """G9 tim duoc loi THAT trong fixture viet cho G8 — khong phai bao oan.
+
+        Ca 1 dat node X o y=0.72cm nen doan (x1.west) -- (g1.north east) lech
+        1.87 do (2.3pt) ngay canh mot doan ngang CHINH XAC. Do la wobble nhin
+        thay duoc, va lenh sua G9 de xuat (`|-`) dung cho chinh ca nay.
+
+        Test nay khoa hanh vi lai: khong ai ve sau duoc coi no la bug roi noi
+        long nguong de \"cho fixture sach\".
+        """
+        findings, _, _ = G.analyze(str(self.pdf))
+        jitter = [f for f in findings if f.code == "G9/route-axis-jitter"]
+        self.assertEqual(len(jitter), 1, "dung mot doan wobble trong fixture")
+        ev = jitter[0].evidence
+        self.assertEqual(ev["edgeIndex"], 0, "wobble thuoc ca 1")
+        self.assertGreater(ev["perpendicularOffsetPt"], 1.0,
+                           "offset phai du lon de mat thay")
+        self.assertTrue(ev["exactSegments"],
+                        "chi bao vi route co doan trung truc chinh xac")
+
 
 class TestRot90FlagIsWired(unittest.TestCase):
     """REGRESSION: co `rot90` tung la CO CHET.
@@ -1077,6 +1097,428 @@ class TestRot90FlagIsWired(unittest.TestCase):
         sp = mk_span("abc", 100, 100, 130, 110, size=10.0)
         sp["rot90"] = False
         self.assertAlmostEqual(G.real_font_size(sp), 10.0, places=6)
+
+
+class TestGeometryHelpers(unittest.TestCase):
+    """Helper cua G9: goc re CO DAU va do lech truc.
+
+    Dau cua goc re la thong tin quyet dinh, khong phai chi tiet phu: goc bo
+    (rounded corners) sinh hai goc re CUNG dau, bac thang sinh TRAI dau. Bo dau
+    di thi hai truong hop khong con phan biet duoc.
+    """
+
+    def test_signed_turn_left_is_positive_right_is_negative(self):
+        left = G._signed_turn_deg((0, 0), (10, 0), (10, 10))
+        right = G._signed_turn_deg((0, 0), (10, 0), (10, -10))
+        self.assertIsNotNone(left)
+        self.assertIsNotNone(right)
+        # Trai dau nghia la TICH AM. Day la tinh chat ma G9 dua vao de tach goc
+        # bo (hai goc re cung dau) khoi bac thang (trai dau).
+        self.assertLess(left * right, 0.0, "hai chieu re phai trai dau")
+        self.assertAlmostEqual(abs(left), 90.0, places=6)
+        self.assertAlmostEqual(abs(right), 90.0, places=6)
+
+    def test_signed_turn_straight_is_zero(self):
+        self.assertAlmostEqual(
+            G._signed_turn_deg((0, 0), (10, 0), (20, 0)), 0.0, places=6)
+
+    def test_signed_turn_degenerate_returns_none(self):
+        self.assertIsNone(G._signed_turn_deg((5, 5), (5, 5), (10, 10)))
+
+    def test_axis_deviation_is_zero_on_axis(self):
+        self.assertAlmostEqual(G._axis_deviation_deg((0, 0), (10, 0)), 0.0,
+                               places=6)
+        self.assertAlmostEqual(G._axis_deviation_deg((0, 0), (0, 10)), 0.0,
+                               places=6)
+
+    def test_axis_deviation_caps_at_45(self):
+        """Duong 45 do la xa truc nhat co the — khong the lech hon 45."""
+        self.assertAlmostEqual(G._axis_deviation_deg((0, 0), (10, 10)), 45.0,
+                               places=6)
+
+    def test_axis_deviation_small_tilt(self):
+        d = G._axis_deviation_deg((0, 0), (100, 2))
+        self.assertGreater(d, 0.5)
+        self.assertLess(d, 2.0)
+
+
+class TestG9RouteMicroStep(unittest.TestCase):
+    """G9 benh 1: bac thang ti hon giua hai doan dai.
+
+    Tieu chi phai la GIAO ba dieu kien. Do bang so that tren
+    fixtures/route-rhythm.pdf: ca loi [85, 2, 80.4] va ca hop le [85, 34, 80.4]
+    co goc re GIONG HET NHAU (+90, -90), nen dau goc re mot minh khong tach
+    duoc; con `rounded corners` cho doan giua 8.49pt NGAN ma hop le, nen do dai
+    mot minh cung khong tach duoc.
+    """
+
+    def test_micro_step_between_long_segments_is_error(self):
+        e = mk_edge([(0, 0), (85, 0), (85, 2), (165, 2)])
+        out = G.check_route_rhythm([e])
+        codes = [f.code for f in out]
+        self.assertIn("G9/route-micro-step", codes)
+        hit = [f for f in out if f.code == "G9/route-micro-step"][0]
+        self.assertEqual(hit.evidence["segmentIndex"], 1)
+        self.assertAlmostEqual(hit.evidence["segmentLengthPt"], 2.0, places=1)
+
+    def test_long_interior_segment_is_ok(self):
+        """REGRESSION: re thuong co goc re GIONG ca loi, chi khac do dai."""
+        e = mk_edge([(0, 0), (85, 0), (85, 34), (165, 34)])
+        out = [f for f in G.check_route_rhythm([e])
+               if f.code == "G9/route-micro-step"]
+        self.assertEqual(out, [], "doan giua 34pt la re binh thuong")
+
+    def test_rounded_corner_chords_are_ok(self):
+        """REGRESSION: `rounded corners` cho doan ngan CUNG dau -> hop le.
+
+        Do that tren fixture: [79.0, 8.49, 22.0, 8.49, 74.4] voi goc re
+        [+45, +45, -45, -45]. Neu chi dung nguong do dai thi bo goc mac dinh
+        cua TikZ (4pt -> day cung 5.66pt) se bi bao oan hang loat.
+        """
+        e = mk_edge([(0, 0), (79, 0), (85, 6), (85, 28),
+                     (79, 34), (5, 34)])
+        out = [f for f in G.check_route_rhythm([e])
+               if f.code == "G9/route-micro-step"]
+        self.assertEqual(out, [], "day cung goc bo khong phai bac thang")
+
+    def test_short_segment_at_end_is_ok(self):
+        """Doan ngan o DAU/CUOI la phan noi vao vien node, khong phai loi."""
+        e = mk_edge([(0, 0), (2, 0), (165, 0)])
+        out = [f for f in G.check_route_rhythm([e])
+               if f.code == "G9/route-micro-step"]
+        self.assertEqual(out, [])
+
+    def test_flattened_curve_is_ok(self):
+        """REGRESSION: Bezier lam phang cho cac doan DAI XAP XI nhau.
+
+        Bac thang that co ti le hai doan ke / doan giua rat lon (do that: 42
+        lan). Duong cong khong bao gio co ti le do, nen dieu kien ti le loai
+        duong cong ra ma khong can biet no la Bezier.
+        """
+        pts = [(0, 0), (10, 1), (20, 3), (29, 6), (37, 10), (44, 15)]
+        out = [f for f in G.check_route_rhythm([mk_edge(pts)])
+               if f.code == "G9/route-micro-step"]
+        self.assertEqual(out, [], "doan lien tiep dai xap xi -> duong cong")
+
+    def test_threshold_is_configurable(self):
+        e = mk_edge([(0, 0), (85, 0), (85, 2), (165, 2)])
+        self.assertTrue(G.check_route_rhythm([e]))
+        loose = G.check_route_rhythm([e], min_interior=0.5)
+        self.assertEqual([f for f in loose
+                          if f.code == "G9/route-micro-step"], [])
+
+    def test_ignore_edges_is_respected(self):
+        e = mk_edge([(0, 0), (85, 0), (85, 2), (165, 2)])
+        out = G.check_route_rhythm([e], ignore_edges={0})
+        self.assertEqual(out, [])
+
+
+class TestG9RouteAxisJitter(unittest.TestCase):
+    """G9 benh 2: route dinh vuong goc nhung mot doan lech vai phan do.
+
+    KHONG duoc dung "moi doan phai vuong goc" lam tieu chi — hinh khoa hoc dung
+    duong cheo va Bezier hop le. Do that cho thay khong nguong tuyet doi nao
+    tach duoc: ca LOI lech 1.209 do / offset 0.5pt, ca HOP LE (bend) lech
+    0.931 do / offset 2.7pt. Ca hop le lech IT hon ma offset LON hon.
+
+    Tieu chi dung: suy Y DINH tu chinh route — chi bao khi route DA tu chung to
+    no vuong goc (co doan trung truc chinh xac) va doan lech ke voi doan do.
+    """
+
+    def test_jitter_next_to_exact_axis_is_error(self):
+        e = mk_edge([(0, 0), (85, 0), (85.5, 23.7)])
+        out = [f for f in G.check_route_rhythm([e])
+               if f.code == "G9/route-axis-jitter"]
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0].evidence["segmentIndex"], 1)
+        self.assertLess(out[0].evidence["axisDeviationDeg"], 5.0)
+
+    def test_pure_diagonal_route_is_ok(self):
+        """REGRESSION: route KHONG co doan trung truc -> khong co co so bao."""
+        e = mk_edge([(0, 0), (50, 30), (100, 62)])
+        out = [f for f in G.check_route_rhythm([e])
+               if f.code == "G9/route-axis-jitter"]
+        self.assertEqual(out, [], "duong cheo co y khong phai jitter")
+
+    def test_45_degree_route_is_ok(self):
+        e = mk_edge([(0, 0), (40, 40), (80, 80)])
+        out = [f for f in G.check_route_rhythm([e])
+               if f.code == "G9/route-axis-jitter"]
+        self.assertEqual(out, [])
+
+    def test_large_deviation_is_not_jitter(self):
+        """Lech 20 do la duong cheo CO Y, khong phai toa do sai."""
+        e = mk_edge([(0, 0), (85, 0), (125, 14.6)])
+        out = [f for f in G.check_route_rhythm([e])
+               if f.code == "G9/route-axis-jitter"]
+        self.assertEqual(out, [])
+
+    def test_exact_axis_route_is_ok(self):
+        e = mk_edge([(0, 0), (85, 0), (85, 34), (165, 34)])
+        out = [f for f in G.check_route_rhythm([e])
+               if f.code == "G9/route-axis-jitter"]
+        self.assertEqual(out, [])
+
+    def test_jitter_threshold_is_configurable(self):
+        e = mk_edge([(0, 0), (85, 0), (85.5, 23.7)])
+        self.assertTrue([f for f in G.check_route_rhythm([e])
+                         if f.code == "G9/route-axis-jitter"])
+        tight = G.check_route_rhythm([e], jitter_max=0.3)
+        self.assertEqual([f for f in tight
+                          if f.code == "G9/route-axis-jitter"], [])
+
+
+class TestG9RealFixture(unittest.TestCase):
+    """G9 tren PDF that: 6 ca, phai phan loai dung ca 6.
+
+    Ba ca hop le o day la ba bay khac nhau: `bend left` (Bezier), `rounded
+    corners` (day cung ngan), va doan ngan o dau route.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.pdf = build_fixture("route-rhythm.tex")
+
+    def test_catches_exactly_two_rhythm_defects(self):
+        findings, inv, _ = G.analyze(str(self.pdf))
+        g9 = [f for f in findings if f.code.startswith("G9/")]
+        codes = sorted(f.code for f in g9)
+        self.assertEqual(codes, ["G9/route-axis-jitter",
+                                 "G9/route-micro-step"],
+                         "phai bat dung 1 bac thang + 1 jitter")
+
+    def test_no_false_positive_on_curve_or_rounded(self):
+        findings, _, _ = G.analyze(str(self.pdf))
+        g9 = [f for f in findings if f.code.startswith("G9/")]
+        hit_edges = {f.evidence["edgeIndex"] for f in g9}
+        # edge #0 = bac thang, #1 = jitter; #2..#5 la cac ca hop le.
+        self.assertEqual(hit_edges, {0, 1},
+                         "chi hai edge dau tien duoc bao")
+
+
+class TestCheckRegistry(unittest.TestCase):
+    """Registry check: them check moi = them mot dong, khong sua analyze().
+
+    Truoc day `analyze()` goi tay tung check, nen them check la phai sua
+    analyze(), va nhung du kien dat tien (khung bao, tap gach typography) de bi
+    tinh lai hai lan.
+    """
+
+    def test_registry_has_nine_checks_with_unique_ids(self):
+        self.assertEqual(len(G.CHECKS), 9)
+        ids = [c[0] for c in G.CHECKS]
+        self.assertEqual(ids, sorted(ids, key=lambda s: int(s[1:])),
+                         "thu tu phai theo so hieu")
+        self.assertEqual(len(set(ids)), len(ids), "ma check phai duy nhat")
+
+    def test_every_check_entry_is_well_formed(self):
+        for cid, name, desc, fn in G.CHECKS:
+            self.assertRegex(cid, r"^G\d+$")
+            self.assertTrue(name and "-" in name, f"{cid}: ten dang kebab-case")
+            self.assertTrue(desc.strip(), f"{cid}: thieu mo ta")
+            self.assertTrue(callable(fn), f"{cid}: thieu ham chay")
+
+    def test_select_only(self):
+        got = [c[0] for c in G.select_checks(only=["G1", "G9"])]
+        self.assertEqual(got, ["G1", "G9"])
+
+    def test_select_skip(self):
+        got = [c[0] for c in G.select_checks(skip=["G9"])]
+        self.assertNotIn("G9", got)
+        self.assertEqual(len(got), 8)
+
+    def test_select_is_case_insensitive(self):
+        self.assertEqual([c[0] for c in G.select_checks(only=["g9"])], ["G9"])
+
+    def test_unknown_code_raises(self):
+        """Bao loi som: `--only G10` viet sai ma nhung exit 0 se lam nguoi
+        dung tin la hinh sach."""
+        with self.assertRaises(ValueError):
+            G.select_checks(only=["G99"])
+        with self.assertRaises(ValueError):
+            G.select_checks(skip=["G0"])
+
+    def test_skip_wins_over_only(self):
+        got = [c[0] for c in G.select_checks(only=["G1", "G9"], skip=["G9"])]
+        self.assertEqual(got, ["G1"])
+
+    def test_every_threshold_default_is_positive_number(self):
+        self.assertTrue(G.THRESHOLD_DEFAULTS)
+        for k, v in G.THRESHOLD_DEFAULTS.items():
+            self.assertIsInstance(v, (int, float), k)
+            self.assertGreater(v, 0, k)
+
+
+class TestCtxLazyFields(unittest.TestCase):
+    """Ctx tinh du kien dat tien MOT lan roi dung chung."""
+
+    def _ctx(self, **kw):
+        base = dict(
+            page=None, page_holder=None,
+            blocks=[], boundaries=[], edges=[], heads=[], masks=[], spans=[],
+            regions=G.NO_FILTER, kind="standalone", preset=None,
+            scale=1.0, min_font=G.MIN_FONT, eps=G.ENDPOINT_EPS, margin=0.0)
+        base.update(kw)
+        return G.Ctx(**base)
+
+    def test_shapes_is_blocks_plus_boundaries(self):
+        b = mk_block(0, 0, 10, 10)
+        d = mk_block(20, 20, 30, 30)
+        c = self._ctx(blocks=[b], boundaries=[d])
+        self.assertEqual(c.shapes, [b, d])
+
+    def test_containers_computed_once(self):
+        inner = mk_block(20, 20, 80, 50)
+        frame = mk_block(10, 10, 170, 60)
+        c = self._ctx(blocks=[inner, frame])
+        self.assertEqual(c.containers, {1})
+        self.assertIs(c.containers, c.containers, "phai cache, khong tinh lai")
+
+    def test_block_containers_excludes_boundary_indices(self):
+        """Chi so `shapes` khop `blocks` o phan dau; khung dashed khong duoc
+        lot vao tap danh cho G1."""
+        inner = mk_block(20, 20, 80, 50)
+        dashed_frame = mk_block(10, 10, 170, 60)
+        c = self._ctx(blocks=[inner], boundaries=[dashed_frame])
+        self.assertEqual(c.containers, {1})
+        self.assertEqual(c.block_containers, set())
+
+    def test_threshold_override(self):
+        c = self._ctx(thresholds={"routeMinInteriorLen": 99.0})
+        self.assertEqual(c.t("routeMinInteriorLen", 6.0), 99.0)
+        self.assertEqual(c.t("khongCoKhoaNay", 3.0), 3.0)
+
+
+class TestCliCheckSelection(unittest.TestCase):
+    """CLI moi: --only / --skip / --config / --list-checks.
+
+    Exit code phai tach ba muc: 0 pass, 1 hinh co loi, 2 loi DUNG TOOL. Lan lon
+    muc 1 va 2 lam CI bao sai.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.pdf = build_fixture("route-rhythm.tex")
+
+    def _run(self, *args):
+        return subprocess.run(
+            [sys.executable, str(REPO / "scripts" / "tikz_gate.py"), *args],
+            capture_output=True, text=True)
+
+    def test_list_checks_needs_no_pdf(self):
+        r = self._run("--list-checks")
+        self.assertEqual(r.returncode, 0)
+        data = json.loads(r.stdout)
+        self.assertEqual(len(data["checks"]), 9)
+        self.assertIn("routeMinInteriorLen", data["thresholds"])
+
+    def test_missing_pdf_exits_2(self):
+        r = self._run("--json")
+        self.assertEqual(r.returncode, 2, "thieu PDF la loi dung tool")
+        self.assertEqual(json.loads(r.stdout)["stage"], "args")
+
+    def test_only_g9_fails_on_rhythm_fixture(self):
+        r = self._run(str(self.pdf), "--json", "--only", "G9")
+        self.assertEqual(r.returncode, 1)
+        codes = {f["code"] for f in json.loads(r.stdout)["findings"]}
+        self.assertTrue(all(c.startswith("G9/") for c in codes), codes)
+
+    def test_skip_g9_passes_on_rhythm_fixture(self):
+        r = self._run(str(self.pdf), "--json", "--skip", "G9")
+        self.assertEqual(r.returncode, 0, "fixture chi co loi G9")
+
+    def test_unknown_check_code_exits_2(self):
+        r = self._run(str(self.pdf), "--json", "--only", "G99")
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("G99", json.loads(r.stdout)["error"])
+
+    def test_config_loosening_silences_both_rhythm_defects(self):
+        """Noi long CA HAI nguong moi het loi: fixture co hai benh doc lap."""
+        cfg = FIXTURES / "_build" / "_test_cfg_loose.json"
+        cfg.write_text(json.dumps({"routeMinInteriorLen": 0.5,
+                                   "routeJitterMaxDeg": 0.3}))
+        try:
+            r = self._run(str(self.pdf), "--json", "--config", str(cfg))
+            self.assertEqual(r.returncode, 0, r.stdout[:400])
+        finally:
+            cfg.unlink()
+
+    def test_config_partial_loosening_still_reports_other_defect(self):
+        cfg = FIXTURES / "_build" / "_test_cfg_part.json"
+        cfg.write_text(json.dumps({"routeMinInteriorLen": 0.5}))
+        try:
+            r = self._run(str(self.pdf), "--json", "--config", str(cfg))
+            self.assertEqual(r.returncode, 1)
+            codes = {f["code"] for f in json.loads(r.stdout)["findings"]}
+            self.assertEqual(codes, {"G9/route-axis-jitter"})
+        finally:
+            cfg.unlink()
+
+    def test_config_unknown_key_exits_2(self):
+        cfg = FIXTURES / "_build" / "_test_cfg_typo.json"
+        cfg.write_text(json.dumps({"routeMinInteriorLenTYPO": 5}))
+        try:
+            r = self._run(str(self.pdf), "--json", "--config", str(cfg))
+            self.assertEqual(r.returncode, 2)
+            self.assertIn("khong biet", json.loads(r.stdout)["error"])
+        finally:
+            cfg.unlink()
+
+    def test_config_negative_value_exits_2(self):
+        cfg = FIXTURES / "_build" / "_test_cfg_neg.json"
+        cfg.write_text(json.dumps({"routeMinInteriorLen": -5}))
+        try:
+            r = self._run(str(self.pdf), "--json", "--config", str(cfg))
+            self.assertEqual(r.returncode, 2)
+        finally:
+            cfg.unlink()
+
+    def test_config_array_exits_2(self):
+        cfg = FIXTURES / "_build" / "_test_cfg_arr.json"
+        cfg.write_text(json.dumps([1, 2, 3]))
+        try:
+            r = self._run(str(self.pdf), "--json", "--config", str(cfg))
+            self.assertEqual(r.returncode, 2)
+        finally:
+            cfg.unlink()
+
+    def test_config_malformed_json_exits_2(self):
+        cfg = FIXTURES / "_build" / "_test_cfg_bad.json"
+        cfg.write_text("{khong phai json")
+        try:
+            r = self._run(str(self.pdf), "--json", "--config", str(cfg))
+            self.assertEqual(r.returncode, 2)
+        finally:
+            cfg.unlink()
+
+
+class TestCrashedCheckIsIsolated(unittest.TestCase):
+    """Mot check hong KHONG duoc lam chet ca gate.
+
+    Ket qua cua 8 check con lai van dung va van dung duoc, nen loi cua mot check
+    phai thanh mot finding rieng chu khong phai exception nem ra ngoai.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.pdf = build_fixture("route-rhythm.tex")
+
+    def test_crash_becomes_warning_and_others_still_run(self):
+        original = G.CHECKS
+
+        def boom(_ctx):
+            raise RuntimeError("loi co y de test")
+
+        G.CHECKS = original[:-1] + (("G9", "route-rhythm", "test", boom),)
+        try:
+            findings, inv, _ = G.analyze(str(self.pdf))
+        finally:
+            G.CHECKS = original
+        crashed = [f for f in findings if f.code == "G9/check-crashed"]
+        self.assertEqual(len(crashed), 1)
+        self.assertEqual(crashed[0].severity, "warning",
+                         "check hong la canh bao, khong phai loi cua hinh")
+        self.assertIn("loi co y de test", crashed[0].message)
 
 
 if __name__ == "__main__":

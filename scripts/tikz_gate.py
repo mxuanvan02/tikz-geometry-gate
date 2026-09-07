@@ -2,7 +2,12 @@
 """tikz-geometry-gate: cong duyet hinh hoc cho hinh TikZ/PDF.
 
 Doc hinh hoc THAT tu PDF content stream (khong dung anh, khong dung vision),
-phat hien 8 nhom loi bo cuc va tra exit code != 0 khi fail.
+phat hien 9 nhom loi bo cuc va tra exit code != 0 khi fail.
+
+Them check moi = them MOT dong vao registry `CHECKS`, khong sua `analyze()`.
+Du kien dat tien (khung bao, vung hinh, tap gach typography) nam trong `Ctx` va
+tinh mot lan. Mot check hong khong lam chet ca gate: no thanh finding
+`Gn/check-crashed` muc warning, cac check con lai van chay.
 
 Checks:
   G1 edge-through-block   mui ten xuyen/de len block khong phai dau mut
@@ -15,10 +20,14 @@ Checks:
   G6 label-edge-clash     nhan de len than mui ten (khong co mask trang)
   G7 edge-edge-overlap    hai mui ten chay trung/song song sat nhau
   G8 edge-border-run      mui ten chay doc vien khung bao (hoa vao vien nhom)
+  G9 route-micro-step     bac thang ti hon giua hai doan dai
+     route-axis-jitter    route dinh vuong goc nhung mot doan lech vai phan do
 
 Usage:
   tikz_gate.py <file.pdf> [--json] [--min-font 6] [--eps 6] [--page 0]
                           [--annotate out.png] [--strict]
+                          [--only G1,G8] [--skip G5] [--config nguong.json]
+  tikz_gate.py --list-checks        # danh sach check + ten nguong, khong can PDF
 Exit: 0 pass, 1 co loi, 2 loi dung tool.
 """
 from __future__ import annotations
@@ -116,6 +125,47 @@ EDGE_BORDER_MIN_LEN = 12.0  # chay doc vien >= 12pt moi bao loi
 # block la khung bao khi no chua tam cua block khac. Dung dien tich se sai voi
 # so do co mot node don le rat to.
 CONTAINER_SAME_BBOX_TOL = 2.0  # bbox lech <= 2pt => coi la cung mot hinh
+
+# G9: NHIP DUONG DI. Hai benh khac nhau, va CA HAI deu khong tach duoc bang mot
+# nguong don le. Do bang so that tren fixtures/route-rhythm.pdf:
+#
+#   ca 1 (LOI, bac thang 2pt):  doan [85.0, 2.0, 80.4]   goc re [90, -90]
+#   ca 6 (HOP LE, re thuong):   doan [85.0, 34.0, 80.4]  goc re [90, -90]
+#
+# Hai ca nay co goc re GIONG HET NHAU, nen "dau goc re" mot minh KHONG phan
+# biet duoc. Khac biet duy nhat la chieu dai doan giua. Nguoc lai:
+#
+#   ca 4 (HOP LE, rounded corners): doan [79.0, 8.49, 22.0, 8.49, 74.4]
+#                                   goc re [45, 45, -45, -45]
+#
+# Doan 8.49pt o day NGAN nhung hop le, vi no la day cung cua goc bo. Nen
+# "chieu dai" mot minh cung khong du. Tieu chi dung la GIAO cua hai dieu kien:
+# doan giua NGAN **va** hai goc re hai ben TRAI DAU (bac thang thuc su). Goc bo
+# luon sinh hai goc re CUNG DAU (45 + 45 thay cho mot goc 90).
+ROUTE_MIN_INTERIOR_LEN = 6.0   # doan GIUA ngan hon nguong nay moi bi xet
+ROUTE_TURN_MIN_DEG = 20.0      # goc re nho hon nguong nay coi nhu di thang
+#
+# Benh thu hai: toa do viet tay lech nhe (`(2,0) -- (2.02,-1)`), route dinh la
+# vuong goc nhung mot doan lech vai phan do. KHONG duoc dung "moi doan phai
+# vuong goc" lam tieu chi — hinh khoa hoc dung duong cheo va Bezier hop le.
+# Do that cho thay ngay:
+#
+#   ca 2 (LOI, jitter):      lech truc 1.209 do, offset 0.5pt
+#   ca 3 (HOP LE, bend):     lech truc 0.931 do, offset 2.7pt
+#
+# Ca hop le lech IT hon ma offset LON hon, nen ca hai nguong deu vo dung neu
+# dung rieng. Tieu chi dung la suy Y DINH tu chinh route: chi bao khi route DA
+# tu chung to no vuong goc (co doan khac trung truc chinh xac) va doan lech nam
+# CO LAP giua nhung doan chinh xac do. Day cung cung Bezier di theo DAY, cac
+# doan lien tiep deu lech, nen khong bi bao.
+ROUTE_AXIS_EXACT_DEG = 0.25    # lech <= nguong nay => coi la trung truc chinh xac
+ROUTE_JITTER_MAX_DEG = 5.0     # lech trong (exact, nguong nay] => nghi jitter
+ROUTE_JITTER_MIN_OFFSET = 0.1  # do lech vuong goc toi thieu de nhin thay
+# Bezier bi lam phang cho cac doan lien tiep DAI XAP XI nhau; bac thang that co
+# hai doan ke dai gap nhieu lan doan giua. Ti le nay tach hai truong hop do.
+# Do that: ca 1 (loi) co 85/2 = 42 lan; ca 4 (rounded, hop le) co 22/8.49 = 2.6
+# lan. Nguong 4.0 nam giua hai gia tri do, khong sat mep ben nao.
+ROUTE_NEIGHBOR_RATIO = 4.0
 
 # ---- Don vi: BIG POINT vs PRINTER POINT (da verify tai may) ----------------
 # PDF ghi co chu (toan hang `Tf`) theo BIG POINT: 1 inch = 72 bp.
@@ -1241,6 +1291,169 @@ def check_edge_border_run(edges, shapes, containers=None,
     return out
 
 
+def _signed_turn_deg(p0, p1, p2):
+    """Goc re co DAU khi di tu doan (p0,p1) sang doan (p1,p2).
+
+    Dau la thong tin quyet dinh cua G9, khong phai chi tiet phu: goc BO (rounded
+    corners) sinh hai goc re CUNG DAU vi no thay mot goc 90 do bang hai goc 45
+    do cung chieu. Bac thang (loi) sinh hai goc re TRAI DAU: re ra roi re nguoc
+    lai. Bo dau di thi hai truong hop nay khong con phan biet duoc.
+    """
+    ax, ay = p1[0] - p0[0], p1[1] - p0[1]
+    bx, by = p2[0] - p1[0], p2[1] - p1[1]
+    na = math.hypot(ax, ay)
+    nb = math.hypot(bx, by)
+    if na < 1e-9 or nb < 1e-9:
+        return None
+    cross = ax * by - ay * bx
+    dot = ax * bx + ay * by
+    return math.degrees(math.atan2(cross, dot))
+
+
+def _axis_deviation_deg(p0, p1):
+    """Do lech cua doan so voi truc gan nhat (ngang hoac doc), trong [0, 45]."""
+    ang = _seg_angle_deg(p0, p1)
+    if ang is None:
+        return None
+    d = ang % 90.0
+    return min(d, 90.0 - d)
+
+
+def _seg_len(seg):
+    return math.hypot(seg[1][0] - seg[0][0], seg[1][1] - seg[0][1])
+
+
+def check_route_rhythm(edges, min_interior=ROUTE_MIN_INTERIOR_LEN,
+                       turn_min=ROUTE_TURN_MIN_DEG,
+                       axis_exact=ROUTE_AXIS_EXACT_DEG,
+                       jitter_max=ROUTE_JITTER_MAX_DEG,
+                       min_offset=ROUTE_JITTER_MIN_OFFSET,
+                       neighbor_ratio=ROUTE_NEIGHBOR_RATIO,
+                       ignore_edges: "set | frozenset" = frozenset()):
+    """G9: nhip duong di sai — hai benh, hai ma loi rieng.
+
+    `G9/route-micro-step`  bac thang tí hon giua hai doan dai (trong nhu loi
+                           render, that ra la toa do lech)
+    `G9/route-axis-jitter` route dinh la vuong goc nhung mot doan lech vai phan
+                           do (toa do viet tay `(2,0) -- (2.02,-1)`)
+
+    KHONG dung mot nguong don le cho ca hai, va cung khong dung nguong do dai
+    mot minh. Do bang so that tren fixtures/route-rhythm.pdf giai thich vi sao:
+
+      ca 1 LOI  bac thang:  doan [85.0, 2.0, 80.4]  goc re [+90, -90]
+      ca 6 OK   re thuong:  doan [85.0, 34.0, 80.4] goc re [+90, -90]
+
+    Hai ca tren co goc re GIONG HET NHAU -> phai dung do dai de tach.
+
+      ca 4 OK   rounded:    doan [79.0, 8.49, 22.0, 8.49, 74.4]
+                            goc re [+45, +45, -45, -45]
+
+    Doan 8.49pt o day NGAN ma hop le (day cung goc bo) -> phai dung DAU goc re
+    de tach. Vi vay tieu chi la GIAO ba dieu kien: doan giua ngan, hai goc re
+    hai ben du sac va TRAI DAU, va hai doan ke deu dai hon doan giua nhieu lan.
+    Dieu kien thu ba bao ve truoc Bezier bi lam phang: tren duong cong cac doan
+    lien tiep co do dai xap xi nhau, khong co ti le 40:1 nhu bac thang that.
+
+      ca 2 LOI  jitter:     lech truc 1.209 do, offset 0.5pt
+      ca 3 OK   bend:       lech truc 0.931 do, offset 2.7pt
+
+    Ca hop le lech IT hon ma offset LON hon ca loi, nen khong nguong tuyet doi
+    nao tach duoc. Tieu chi dung la suy Y DINH tu chinh route: chi bao khi route
+    DA tu chung to no vuong goc — co it nhat mot doan trung truc chinh xac — va
+    doan lech co doan ke trung truc chinh xac. Duong cong khong thoa vi moi doan
+    cua no deu lech.
+    """
+    out = []
+    for ei, e in enumerate(edges):
+        if ei in ignore_edges or not e.poly or len(e.poly) < 2:
+            continue
+        segs = _segments(e.poly)
+        if not segs:
+            continue
+        lens = [_seg_len(s) for s in segs]
+        devs = [_axis_deviation_deg(*s) for s in segs]
+
+        # --- benh 1: bac thang ti hon giua hai doan dai -----------------
+        turns = [_signed_turn_deg(e.poly[i], e.poly[i + 1], e.poly[i + 2])
+                 for i in range(len(e.poly) - 2)]
+        for si in range(1, len(segs) - 1):
+            t_in, t_out = turns[si - 1], turns[si]
+            if t_in is None or t_out is None:
+                continue
+            if lens[si] >= min_interior:
+                continue
+            if abs(t_in) < turn_min or abs(t_out) < turn_min:
+                continue
+            # Goc bo: hai goc re CUNG dau. Bac thang: TRAI dau.
+            if (t_in > 0) == (t_out > 0):
+                continue
+            # Bezier lam phang: cac doan lien tiep dai xap xi nhau.
+            if min(lens[si - 1], lens[si + 1]) < neighbor_ratio * lens[si]:
+                continue
+            mid = ((segs[si][0][0] + segs[si][1][0]) / 2.0,
+                   (segs[si][0][1] + segs[si][1][1]) / 2.0)
+            out.append(Finding(
+                "G9/route-micro-step", "error",
+                f"mui ten #{ei} co bac thang {lens[si]:.1f}pt o giua hai doan "
+                f"{lens[si - 1]:.0f}pt va {lens[si + 1]:.0f}pt — trong nhu loi "
+                f"render",
+                {"edgeIndex": ei, "segmentIndex": si,
+                 "segment": [list(segs[si][0]), list(segs[si][1])],
+                 "segmentLengthPt": _r(lens[si]),
+                 "neighborLengthsPt": [_r(lens[si - 1]), _r(lens[si + 1])],
+                 "turnInDeg": _r(t_in, 2), "turnOutDeg": _r(t_out, 2),
+                 "thresholdPt": min_interior,
+                 "midPoint": [_r(mid[0]), _r(mid[1])],
+                 "bbox": [min(segs[si][0][0], segs[si][1][0]) - 2,
+                          min(segs[si][0][1], segs[si][1][1]) - 2,
+                          max(segs[si][0][0], segs[si][1][0]) + 2,
+                          max(segs[si][0][1], segs[si][1][1]) + 2]},
+                ["cho hai doan ke thang hang (dung cung toa do x hoac y)",
+                 "dung via/channel de doi huong mot lan thay vi hai lan",
+                 "neu muon bo goc thi dung `rounded corners`, dung lech toa do"]))
+
+        # --- benh 2: route dinh vuong goc nhung mot doan lech nhe -------
+        exact = [i for i, d in enumerate(devs)
+                 if d is not None and d <= axis_exact]
+        if not exact:
+            # Route khong tu chung to no vuong goc (vi du duong cong, duong
+            # cheo co y) -> khong co co so de goi mot doan la \"lech\".
+            continue
+        for si, d in enumerate(devs):
+            if d is None or not (axis_exact < d <= jitter_max):
+                continue
+            offset = lens[si] * math.sin(math.radians(d))
+            if offset < min_offset:
+                continue
+            # Doan ke phai trung truc CHINH XAC. Tren duong cong moi doan deu
+            # lech, nen dieu kien nay loai duong cong ra.
+            neigh = [i for i in (si - 1, si + 1) if 0 <= i < len(segs)]
+            if not any(i in exact for i in neigh):
+                continue
+            mid = ((segs[si][0][0] + segs[si][1][0]) / 2.0,
+                   (segs[si][0][1] + segs[si][1][1]) / 2.0)
+            out.append(Finding(
+                "G9/route-axis-jitter", "error",
+                f"mui ten #{ei} doan #{si} lech truc {d:.2f} do "
+                f"({offset:.1f}pt) trong khi route co doan trung truc chinh "
+                f"xac — toa do lech, khong phai duong cheo co y",
+                {"edgeIndex": ei, "segmentIndex": si,
+                 "segment": [list(segs[si][0]), list(segs[si][1])],
+                 "axisDeviationDeg": _r(d, 3),
+                 "perpendicularOffsetPt": _r(offset, 2),
+                 "segmentLengthPt": _r(lens[si]),
+                 "exactSegments": exact,
+                 "midPoint": [_r(mid[0]), _r(mid[1])],
+                 "bbox": [min(segs[si][0][0], segs[si][1][0]) - 2,
+                          min(segs[si][0][1], segs[si][1][1]) - 2,
+                          max(segs[si][0][0], segs[si][1][0]) + 2,
+                          max(segs[si][0][1], segs[si][1][1]) + 2]},
+                ["lam tron toa do cho khop truc (2.02 -> 2)",
+                 "dung cu phap neo `(a.east) |- (b.west)` thay vi toa do tay",
+                 "neu that su muon duong cheo thi cho no cheo ro rang"]))
+    return out
+
+
 def check_tiny_text(spans, min_font=MIN_FONT, base_font=None,
                     scale=1.0, kind="document", preset=None,
                     page_width=None):
@@ -1529,8 +1742,192 @@ def _open_page(pdf_path, page_no):
     return page, holder, pdf.close
 
 
+@dataclass
+class Ctx:
+    """Moi du kien mot check co the can, tinh MOT lan roi dung chung.
+
+    Ly do co lop nay thay vi truyen tham so roi: truoc day `analyze()` goi tay
+    tung check, nen them mot check la phai sua `analyze()`, va nhung du kien dat
+    tien (khung bao, vung hinh, tap gach typography) de bi tinh lai hai lan.
+    Voi Ctx + `CHECKS`, mot check moi chi can khai bao trong registry.
+    """
+
+    page: object
+    page_holder: object
+    blocks: list
+    boundaries: list
+    edges: list
+    heads: list
+    masks: list
+    spans: list
+    regions: object
+    kind: str
+    preset: object
+    scale: float
+    min_font: float
+    eps: float
+    margin: float
+    thresholds: dict = field(default_factory=dict)
+    # Tinh tre (lazy) vi khong phai check nao cung can, va chung khong re.
+    _containers: "set | None" = None
+    _rule_edges: "set | None" = None
+
+    @property
+    def shapes(self):
+        """Block + boundary: khung nhom co the ve net lien HOAC net dut."""
+        return self.blocks + self.boundaries
+
+    @property
+    def containers(self):
+        if self._containers is None:
+            self._containers = container_indices(self.shapes)
+        return self._containers
+
+    @property
+    def block_containers(self):
+        """Khung bao thuoc rieng `blocks` (chi so khop phan dau cua `shapes`)."""
+        return {i for i in self.containers if i < len(self.blocks)}
+
+    @property
+    def rule_edges(self):
+        if self._rule_edges is None:
+            self._rule_edges = rule_edge_indices(
+                self.edges, self.blocks, self.heads)
+        return self._rule_edges
+
+    def t(self, name, default):
+        """Nguong theo ten, cho phep ghi de qua --config."""
+        v = self.thresholds.get(name)
+        return default if v is None else v
+
+
+#: Nguong mac dinh co the ghi de qua `--config file.json`.
+#:
+#: Vi sao can: moi nha xuat ban / moi loai hinh co chuan khac nhau (san chu,
+#: do chat cua nhip route). Hardcode thi nguoi dung phai sua code, va sua code
+#: thi mat duong ve ban goc. Khai bao o day de `--config` va `--list-checks`
+#: doc duoc cung mot nguon.
+THRESHOLD_DEFAULTS = {
+    "endpointEps": ENDPOINT_EPS,
+    "throughMinLen": THROUGH_MIN_LEN,
+    "minFont": MIN_FONT,
+    "edgeClashMin": EDGE_CLASH_MIN,
+    "edgeOverlapTol": EDGE_OVERLAP_TOL,
+    "edgeOverlapMinLen": EDGE_OVERLAP_MIN_LEN,
+    "edgeBorderTol": EDGE_BORDER_TOL,
+    "edgeBorderMinLen": EDGE_BORDER_MIN_LEN,
+    "routeMinInteriorLen": ROUTE_MIN_INTERIOR_LEN,
+    "routeTurnMinDeg": ROUTE_TURN_MIN_DEG,
+    "routeAxisExactDeg": ROUTE_AXIS_EXACT_DEG,
+    "routeJitterMaxDeg": ROUTE_JITTER_MAX_DEG,
+    "routeJitterMinOffset": ROUTE_JITTER_MIN_OFFSET,
+    "routeNeighborRatio": ROUTE_NEIGHBOR_RATIO,
+}
+
+
+def _run_g1(c):
+    return check_edge_through_block(
+        c.edges, c.blocks, eps=c.eps,
+        min_len=c.t("throughMinLen", THROUGH_MIN_LEN),
+        ignore_blocks=c.block_containers)
+
+
+def _run_g2(c):
+    return check_label_block(c.spans, c.blocks, regions=c.regions)
+
+
+def _run_g3(c):
+    return check_label_label(c.spans, regions=c.regions)
+
+
+def _run_g4(c):
+    return check_bounds(c.page_holder, c.shapes + c.edges, c.spans,
+                        margin=c.margin)
+
+
+def _run_g5(c):
+    return check_tiny_text(c.spans, min_font=c.min_font, scale=c.scale,
+                           kind=c.kind, preset=c.preset,
+                           page_width=c.page_holder.rect.width)
+
+
+def _run_g6(c):
+    return check_label_edge(c.spans, c.edges, c.masks,
+                            min_area=c.t("edgeClashMin", EDGE_CLASH_MIN),
+                            regions=c.regions, ignore_edges=c.rule_edges)
+
+
+def _run_g7(c):
+    return check_edge_edge(c.edges,
+                           tol=c.t("edgeOverlapTol", EDGE_OVERLAP_TOL),
+                           min_len=c.t("edgeOverlapMinLen",
+                                       EDGE_OVERLAP_MIN_LEN),
+                           ignore_edges=c.rule_edges)
+
+
+def _run_g8(c):
+    return check_edge_border_run(c.edges, c.shapes, containers=c.containers,
+                                 tol=c.t("edgeBorderTol", EDGE_BORDER_TOL),
+                                 min_len=c.t("edgeBorderMinLen",
+                                             EDGE_BORDER_MIN_LEN),
+                                 ignore_edges=c.rule_edges)
+
+
+def _run_g9(c):
+    return check_route_rhythm(
+        c.edges,
+        min_interior=c.t("routeMinInteriorLen", ROUTE_MIN_INTERIOR_LEN),
+        turn_min=c.t("routeTurnMinDeg", ROUTE_TURN_MIN_DEG),
+        axis_exact=c.t("routeAxisExactDeg", ROUTE_AXIS_EXACT_DEG),
+        jitter_max=c.t("routeJitterMaxDeg", ROUTE_JITTER_MAX_DEG),
+        min_offset=c.t("routeJitterMinOffset", ROUTE_JITTER_MIN_OFFSET),
+        neighbor_ratio=c.t("routeNeighborRatio", ROUTE_NEIGHBOR_RATIO),
+        ignore_edges=c.rule_edges)
+
+
+#: Registry check. Them check moi = them mot dong o day, khong sua `analyze()`.
+#: Thu tu quyet dinh thu tu finding trong bao cao, nen giu theo so hieu.
+CHECKS = (
+    ("G1", "edge-through-block", "mui ten xuyen than block", _run_g1),
+    ("G2", "label-block-straddle", "nhan chong vien block", _run_g2),
+    ("G3", "label-label-overlap", "hai nhan chong nhau", _run_g3),
+    ("G4", "out-of-bounds", "phan tu tran khoi trang", _run_g4),
+    ("G5", "tiny-text", "chu nho hon san doc duoc", _run_g5),
+    ("G6", "label-edge-clash", "nhan bi duong di xuyen qua", _run_g6),
+    ("G7", "edge-edge-overlap", "hai mui ten chay trung nhau", _run_g7),
+    ("G8", "edge-border-run", "mui ten chay doc vien khung bao", _run_g8),
+    ("G9", "route-rhythm", "nhip duong di sai (bac thang / lech truc)", _run_g9),
+)
+
+CHECK_IDS = tuple(c[0] for c in CHECKS)
+
+
+def select_checks(only=None, skip=None):
+    """Loc registry theo --only/--skip. Raise khi ma check khong ton tai.
+
+    Bao loi som quan trong hon la bo qua am tham: `--only G10` viet sai ma
+    nhung gate van exit 0 se lam nguoi dung tin la hinh sach.
+    """
+    known = set(CHECK_IDS)
+    only = {s.strip().upper() for s in (only or []) if s.strip()}
+    skip = {s.strip().upper() for s in (skip or []) if s.strip()}
+    bad = (only | skip) - known
+    if bad:
+        raise ValueError(
+            f"ma check khong biet: {sorted(bad)}; hop le: {list(CHECK_IDS)}")
+    out = []
+    for cid, name, desc, fn in CHECKS:
+        if only and cid not in only:
+            continue
+        if cid in skip:
+            continue
+        out.append((cid, name, desc, fn))
+    return tuple(out)
+
+
 def analyze(pdf_path, page_no=0, min_font=MIN_FONT, eps=ENDPOINT_EPS,
-            margin=0.0, block_min_area=BLOCK_MIN_AREA, scale=1.0):
+            margin=0.0, block_min_area=BLOCK_MIN_AREA, scale=1.0,
+            only=None, skip=None, thresholds=None):
     page, page_holder, close = _open_page(pdf_path, page_no)
     blocks, boundaries, edges, heads, masks = classify(
         page, block_min_area=block_min_area)
@@ -1552,31 +1949,34 @@ def analyze(pdf_path, page_no=0, min_font=MIN_FONT, eps=ENDPOINT_EPS,
     # Khung bao phai duoc xac dinh TRUOC G1: mui ten noi hai node cung nhom di
     # qua long khung la hop le, nen G1 phai bo qua khung. `shapes` gop ca
     # boundary vi khung nhom co the ve net dut.
-    shapes = blocks + boundaries
-    containers = container_indices(shapes)
-    # Chi so trong `shapes` khop voi `blocks` o phan dau (shapes = blocks +
-    # boundaries), nen loc lay rieng khung bao thuoc `blocks` cho G1.
-    block_containers = {i for i in containers if i < len(blocks)}
+    ctx = Ctx(
+        page=page, page_holder=page_holder,
+        blocks=blocks, boundaries=boundaries, edges=edges,
+        heads=heads, masks=masks, spans=spans,
+        regions=regions, kind=kind, preset=preset,
+        scale=scale, min_font=min_font, eps=eps, margin=margin,
+        thresholds=dict(thresholds or {}))
 
+    # Chay theo registry. Mot check hong KHONG duoc lam chet ca gate: bao cao
+    # loi cua no nhu mot finding rieng roi chay tiep, vi ket qua 8 check con lai
+    # van dung va van dung duoc.
+    selected = select_checks(only=only, skip=skip)
     findings = []
-    findings += check_edge_through_block(edges, blocks, eps=eps,
-                                        ignore_blocks=block_containers)
-    findings += check_label_block(spans, blocks, regions=regions)
-    findings += check_label_label(spans, regions=regions)
-    findings += check_bounds(page_holder, blocks + boundaries + edges, spans,
-                             margin=margin)
-    findings += check_tiny_text(spans, min_font=min_font, scale=scale,
-                                kind=kind, preset=preset,
-                                page_width=pr.width)
-    rule_edges = rule_edge_indices(edges, blocks, heads)
-    findings += check_label_edge(spans, edges, masks, regions=regions,
-                                 ignore_edges=rule_edges)
-    findings += check_edge_edge(edges, ignore_edges=rule_edges)
-    # G8 dung lai `shapes`/`containers` da tinh o tren (khung nhom co the ve
-    # net lien -> block, hoac net dut -> boundary; ca hai deu la vien ma mui
-    # ten co the hoa vao).
-    findings += check_edge_border_run(edges, shapes, containers=containers,
-                                      ignore_edges=rule_edges)
+    check_errors = []
+    for cid, name, _desc, fn in selected:
+        try:
+            findings += fn(ctx)
+        except Exception as exc:
+            check_errors.append({"check": cid, "error": str(exc)})
+            findings.append(Finding(
+                f"{cid}/check-crashed", "warning",
+                f"check {cid} ({name}) loi khi chay: {exc}",
+                {"check": cid, "exception": str(exc)},
+                ["bao loi kem PDF gay loi",
+                 f"tam thoi chay voi --skip {cid}"]))
+
+    containers = ctx.containers
+    rule_edges = ctx.rule_edges
 
     inventory = {
         "blocks": len(blocks), "boundaries": len(boundaries),
@@ -1683,7 +2083,10 @@ def annotate(pdf_path, out_png, findings, page_no=0, zoom=3.0):
 
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="tikz_gate")
-    ap.add_argument("pdf")
+    # `nargs="?"` vi `--list-checks` phai chay duoc KHONG can PDF: nguoi dung
+    # goi no chinh la de biet ma check va ten nguong hop le truoc khi go lenh
+    # that. Bat buoc co PDF o day thi tra loi duoc cau hoi do la khong the.
+    ap.add_argument("pdf", nargs="?", default=None)
     ap.add_argument("--json", action="store_true")
     ap.add_argument("--min-font", type=float, default=MIN_FONT)
     ap.add_argument("--eps", type=float, default=ENDPOINT_EPS)
@@ -1696,7 +2099,77 @@ def main(argv=None):
                          "\\resizebox{0.46\\linewidth}); mac dinh 1.0")
     ap.add_argument("--strict", action="store_true",
                     help="coi warning la loi (exit 1)")
+    ap.add_argument("--only", default=None,
+                    help="chi chay cac check nay (vi du G1,G8); phan cach bang dau phay")
+    ap.add_argument("--skip", default=None,
+                    help="bo qua cac check nay (vi du G5,G9)")
+    ap.add_argument("--config", default=None,
+                    help="file JSON ghi de nguong (xem --list-checks de biet ten)")
+    ap.add_argument("--list-checks", action="store_true",
+                    help="in danh sach check va nguong mac dinh roi thoat")
     args = ap.parse_args(argv)
+
+    # --list-checks tra loi ngay, khong can PDF. Dat truoc moi validate khac vi
+    # nguoi dung goi no CHINH LA de biet tham so hop le la gi.
+    if args.list_checks:
+        info = {
+            "checks": [{"id": cid, "name": name, "description": desc}
+                       for cid, name, desc, _ in CHECKS],
+            "thresholds": THRESHOLD_DEFAULTS,
+        }
+        print(json.dumps(info, ensure_ascii=False, indent=2))
+        return 0
+
+    # `pdf` la nargs="?" chi de --list-checks chay duoc khong can no. Moi duong
+    # chay khac VAN bat buoc co PDF, va thieu la loi DUNG TOOL (exit 2) chu
+    # khong phai "hinh sach" (exit 0) — lan lon hai thu nay lam CI bao sai.
+    if not args.pdf:
+        print(json.dumps({"ok": False, "stage": "args",
+                          "error": "thieu duong dan PDF (chi --list-checks moi "
+                                   "chay duoc ma khong can PDF)"},
+                         ensure_ascii=False))
+        return 2
+
+    thresholds = {}
+    if args.config:
+        try:
+            with open(args.config, encoding="utf-8") as fh:
+                raw = json.load(fh)
+        except Exception as exc:
+            print(json.dumps({"ok": False, "stage": "args",
+                              "error": f"khong doc duoc --config {args.config}: {exc}"},
+                             ensure_ascii=False))
+            return 2
+        if not isinstance(raw, dict):
+            print(json.dumps({"ok": False, "stage": "args",
+                              "error": "--config phai la object JSON {ten: gia_tri}"},
+                             ensure_ascii=False))
+            return 2
+        # Tu choi khoa la gi khong biet, thay vi bo qua am tham: mot khoa viet
+        # sai ma van exit 0 se lam nguoi dung tin la nguong da doi.
+        unknown = sorted(set(raw) - set(THRESHOLD_DEFAULTS))
+        if unknown:
+            print(json.dumps({"ok": False, "stage": "args",
+                              "error": f"khoa nguong khong biet: {unknown}",
+                              "known": sorted(THRESHOLD_DEFAULTS)},
+                             ensure_ascii=False))
+            return 2
+        for k, v in raw.items():
+            if not isinstance(v, (int, float)) or isinstance(v, bool) or v <= 0:
+                print(json.dumps({"ok": False, "stage": "args",
+                                  "error": f"nguong {k!r} phai la so > 0, nhan duoc {v!r}"},
+                                 ensure_ascii=False))
+                return 2
+        thresholds = {k: float(v) for k, v in raw.items()}
+
+    only = args.only.split(",") if args.only else None
+    skip = args.skip.split(",") if args.skip else None
+    try:
+        select_checks(only=only, skip=skip)
+    except ValueError as exc:
+        print(json.dumps({"ok": False, "stage": "args", "error": str(exc)},
+                         ensure_ascii=False))
+        return 2
 
     # Validate tham so TRUOC khi mo PDF: sai tham so la loi DUNG TOOL (exit 2),
     # khong phai "hinh co loi" (exit 1). Lan lon hai thu nay lam CI bao sai.
@@ -1720,7 +2193,8 @@ def main(argv=None):
         findings, inventory, _ = analyze(
             args.pdf, page_no=args.page, min_font=args.min_font,
             eps=args.eps, margin=args.margin,
-            block_min_area=args.block_min_area, scale=args.scale)
+            block_min_area=args.block_min_area, scale=args.scale,
+            only=only, skip=skip, thresholds=thresholds)
     except Exception as exc:
         print(json.dumps({"ok": False, "stage": "analyze",
                           "error": str(exc)}, ensure_ascii=False))
