@@ -35,16 +35,18 @@ python scripts/tikz_gate.py figure.pdf --json --annotate loi.png   # khoanh đ�
 
 Exit: `0` pass, `1` có lỗi, `2` lỗi dùng tool.
 
-## Sáu nhóm check
+## Tám nhóm check
 
 | Mã | Bắt gì |
 |---|---|
-| `G1/edge-through-block` | mũi tên xuyên/đè block không phải đầu mút |
+| `G1/edge-through-block` | mũi tên xuyên/đè block không phải đầu mút (miễn khung bao) |
 | `G2/label-block-straddle` | nhãn chồng viền block |
 | `G3/label-label-overlap` | hai nhãn chồng nhau |
 | `G4/out-of-bounds` | phần tử tràn khỏi trang |
 | `G5/tiny-text` | chữ nhỏ hơn sàn (bắt chữ teo do `\resizebox`) |
 | `G6/label-edge-clash` | nhãn bị đường đi xuyên qua, không có mask che |
+| `G7/edge-edge-overlap` | hai mũi tên chạy trùng/song song sát nhau trên đoạn dài |
+| `G8/edge-border-run` | mũi tên chạy dọc viền khung bao (`\node[fit=…]`), hoà vào viền nhóm |
 
 ## Output
 

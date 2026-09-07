@@ -2,15 +2,19 @@
 """tikz-geometry-gate: cong duyet hinh hoc cho hinh TikZ/PDF.
 
 Doc hinh hoc THAT tu PDF content stream (khong dung anh, khong dung vision),
-phat hien 6 nhom loi bo cuc va tra exit code != 0 khi fail.
+phat hien 8 nhom loi bo cuc va tra exit code != 0 khi fail.
 
 Checks:
   G1 edge-through-block   mui ten xuyen/de len block khong phai dau mut
+                          (mien khung bao: duong noi hai node cung nhom BAT
+                          BUOC di qua long khung, xem `container_indices`)
   G2 label-block-straddle nhan chong len vien block (khong phai nhan cua block)
   G3 label-label-overlap  hai nhan chong nhau
   G4 out-of-bounds        phan tu tran khoi trang / vung noi dung
   G5 tiny-text            chu nho hon san (mac dinh 6pt)
   G6 label-edge-clash     nhan de len than mui ten (khong co mask trang)
+  G7 edge-edge-overlap    hai mui ten chay trung/song song sat nhau
+  G8 edge-border-run      mui ten chay doc vien khung bao (hoa vao vien nhom)
 
 Usage:
   tikz_gate.py <file.pdf> [--json] [--min-font 6] [--eps 6] [--page 0]
@@ -100,6 +104,19 @@ EDGE_OVERLAP_TOL = 1.5      # hai duong cach nhau <= 1.5pt => coi nhu trung
 EDGE_OVERLAP_MIN_LEN = 8.0  # doan trung nhau >= 8pt moi bao loi
 EDGE_PARALLEL_DEG = 12.0    # goc lech <= 12 do => coi la song song
 
+# G8: mui ten chay DOC VIEN KHUNG BAO. Trong so do dung \node[fit=...] voi
+# thu vien `backgrounds` (kieu khung nhom module), khung bao la mot hinh chu
+# nhat lon. Mui ten di sat vien khung se HOA VAO vien do: mat nguoi khong tach
+# duoc dau la vien nhom, dau la quan he. G1 khong bat duoc vi mui ten khong
+# XUYEN qua khung, no chi ap sat. G7 khong bat duoc vi vien khung khong phai
+# `edge` (no la block/boundary co fill).
+EDGE_BORDER_TOL = 2.0       # mui ten cach vien khung <= 2pt => coi nhu trung
+EDGE_BORDER_MIN_LEN = 12.0  # chay doc vien >= 12pt moi bao loi
+# Khung BAO duoc nhan biet bang CAU TRUC, khong bang nguong dien tich: mot
+# block la khung bao khi no chua tam cua block khac. Dung dien tich se sai voi
+# so do co mot node don le rat to.
+CONTAINER_SAME_BBOX_TOL = 2.0  # bbox lech <= 2pt => coi la cung mot hinh
+
 # ---- Don vi: BIG POINT vs PRINTER POINT (da verify tai may) ----------------
 # PDF ghi co chu (toan hang `Tf`) theo BIG POINT: 1 inch = 72 bp.
 # TeX/LaTeX dung PRINTER POINT: 1 inch = 72.27 pt.
@@ -181,6 +198,62 @@ def is_large_math_glyph(span) -> bool:
 def is_math_ext_font(font: str) -> bool:
     """Font toan mo rong / ky hieu lon -> mien kiem tra hinh hoc va co chu."""
     return bool(font) and bool(MATH_EXT_FONT_RE.search(font))
+
+
+# BAY DA DO BANG SO THAT (tieuluan p15, nhan truc doc cua bieu do):
+#   glyph 'l' bao size=2.18 nhung matrix=(0.0, 0.7838, -0.7838, 0.0, ...)
+#   -> day la ma tran QUAY 90 do. Khi chu bi quay, chieu rong va chieu cao bbox
+#      DAO NHAU, va so `size` ma trinh trich xuat bao ra khong con la co chu ma
+#      nguoi doc thay. Do bbox that: w=7.84 h=2.18 -> co chu THAT la 7.84pt
+#      (= scale cua matrix 0.7838 x 10pt), tuc HOP LE, khong phai chu teo.
+#   Khong xet matrix thi gate bao oan MOI nhan truc doc trong moi bieu do.
+def glyph_scale(matrix) -> float:
+    """He so phong that cua text matrix (chuan Frobenius cua phan 2x2)."""
+    if not matrix or len(matrix) < 4:
+        return 1.0
+    a, b, c, d = (float(matrix[i]) for i in range(4))
+    sx = math.hypot(a, b)
+    sy = math.hypot(c, d)
+    if sx <= 0 or sy <= 0:
+        return max(sx, sy, 1e-9)
+    return (sx + sy) / 2.0
+
+
+# Chu bi QUAY 90 do (nhan truc doc cua bieu do). PDF ghi text matrix
+# (a, b, c, d, e, f); quay +-90 do thi a~0 va d~0 (b, c khac 0).
+ROT90_EPS = 0.01
+
+
+def is_rot90_matrix(matrix) -> bool:
+    """True khi text matrix la phep quay +-90 do."""
+    if not matrix or len(matrix) < 4:
+        return False
+    a, b, c, d = (float(x) for x in matrix[:4])
+    return (abs(a) < ROT90_EPS and abs(d) < ROT90_EPS
+            and (abs(b) > ROT90_EPS or abs(c) > ROT90_EPS))
+
+
+def real_font_size(span) -> float:
+    """Co chu THAT (bp) cua span, tinh ca truong hop chu bi quay 90 do.
+
+    BAY DA DO BANG SO THAT (tieuluan.pdf trang 15, nhan truc doc cua bieu do):
+      pdfplumber tra size=2.18 cho chu 'l', matrix=(0, 0.7838, -0.7838, 0)
+      bbox=(507.8, 481.2, 515.6, 483.4) -> rong 7.84pt, cao 2.18pt
+    Chu quay 90 do thi truc do bi DAO: 2.18 la BE NGANG cua chu 'l' (advance),
+    con 7.84 moi la co chu. Doc thang `size` se bao oan "chu 2.18pt" trong khi
+    thuc te la 7.84pt — hoan toan doc duoc.
+
+    Chi ap cho quay +-90 do (a~0 va d~0). Quay goc khac giu nguyen `size` vi
+    khong suy ra duoc mot cach chac chan.
+    """
+    size = float(span.get("size") or 0)
+    if not span.get("rot90"):
+        return size
+    b = span.get("bbox")
+    if not b or len(b) != 4:
+        return size
+    # Chu chay theo chieu doc: be ngang cua bbox chinh la chieu cao font.
+    return max(size, abs(float(b[2]) - float(b[0])))
 
 
 def to_texpt(size_bp: float) -> float:
@@ -438,10 +511,17 @@ def text_spans_pymupdf(page, pad=LABEL_PAD):
                 if not txt.strip():
                     continue
                 b = sp["bbox"]
+                # PyMuPDF khong tra text matrix, nhung `dir` la vector huong
+                # cua dong chu: (1,0) la nam ngang, (0,-1)/(0,1) la quay 90 do.
+                # Can co nay de real_font_size() sua lai co chu cua nhan doc.
+                d = ln.get("dir") or (1.0, 0.0)
+                rot90 = (abs(float(d[0])) < ROT90_EPS
+                         and abs(float(d[1])) > ROT90_EPS)
                 out.append({
                     "text": txt,
                     "size": float(sp.get("size", 0)),
                     "font": sp.get("font", ""),
+                    "rot90": rot90,
                     "bbox": (_r(b[0]), _r(b[1]), _r(b[2]), _r(b[3])),
                     "geom": box(b[0] + pad, b[1] + pad, b[2] - pad, b[3] - pad),
                 })
@@ -600,6 +680,7 @@ def text_spans_pdfplumber(page, pad=LABEL_PAD):
                 "text": cur["text"],
                 "size": cur["size"],
                 "font": cur["font"],
+                "rot90": cur["rot90"],
                 "bbox": (_r(x0), _r(y0), _r(x1), _r(y1)),
                 "geom": box(x0 + pad, y0 + pad, max(x1 - pad, x0 + pad + 0.01),
                             max(y1 - pad, y0 + pad + 0.01)),
@@ -620,14 +701,19 @@ def text_spans_pdfplumber(page, pad=LABEL_PAD):
         # Nguong tien cung phai nho de tach theo TU (khop voi span cua
         # PyMuPDF), vi khoang trang giua tu trong PDF TikZ thuong khong co
         # char space that ma chi la gap ~3pt.
+        # Chu bi quay 90 do: pdfplumber tra `matrix` cua char. Can co nay de
+        # real_font_size() lay dung co chu (bbox bi dao truc khi quay).
+        rot90 = is_rot90_matrix(c.get("matrix"))
         same = (cur is not None
                 and abs(cur["size"] - size) < 0.05
                 and cur["font"] == font
+                and cur["rot90"] == rot90
                 and abs(cur["top"] - top) < 0.6
                 and -1.0 <= gap <= max(1.5, size * 0.15))
         if not same:
             flush()
             cur = {"text": "", "size": size, "font": font, "top": top,
+                   "rot90": rot90,
                    "x0": x0, "y0": top, "x1": x1, "y1": bottom}
         cur["text"] += txt
         cur["x1"] = max(cur["x1"], x1)
@@ -656,17 +742,33 @@ def text_spans(page, pad=LABEL_PAD):
 # ---- checks ---------------------------------------------------------------
 
 def check_edge_through_block(edges, blocks, eps=ENDPOINT_EPS,
-                             min_len=THROUGH_MIN_LEN):
+                             min_len=THROUGH_MIN_LEN,
+                             ignore_blocks: "set | frozenset" = frozenset()):
     """G1: mui ten xuyen than block.
 
     Mui ten hop le luon bat dau/ket thuc o VIEN block, nen phan giao chi nam
     trong ban kinh eps quanh dau mut. Giao o giua than edge = loi.
+
+    BAY DA DO BANG SO THAT (fixture border-run.pdf, ca 3 von HOP LE): mot mui
+    ten noi hai node NAM TRONG cung mot khung nhom (\\node[fit=...] voi thu
+    vien `backgrounds`) bat buoc phai di qua LONG khung do. G1 doc phan giao
+    ay thanh "xuyen qua block" va bao loi — do la FALSE POSITIVE tren MOI so
+    do dung fit+backgrounds. Do that: edge #2 [(64.6, 253.6) -> (81.8, 253.6)]
+    bi bao xuyen block #10 17.2pt, trong khi block #10 chinh la khung bao.
+    Vi vay `ignore_blocks` phai nhan tap khung bao tu `container_indices`.
+    Khung bao co check rieng la G8 (mui ten chay DOC VIEN khung), dung ban chat
+    hon: van de cua khung khong phai bi xuyen qua, ma la bi hoa vao vien.
     """
     out = []
     for ei, e in enumerate(edges):
         ls = e.geom
         p0, p1 = Point(ls.coords[0]), Point(ls.coords[-1])
         for bi, b in enumerate(blocks):
+            # Khung bao (\node[fit=...]): mui ten noi hai node cung nhom BAT
+            # BUOC di qua long khung, nen phan giao o day khong phai loi. Loi
+            # cua khung bao la chay DOC VIEN, do G8 phu trach.
+            if bi in ignore_blocks:
+                continue
             inter = ls.intersection(b.geom)
             if inter.is_empty:
                 continue
@@ -1010,6 +1112,135 @@ def check_edge_edge(edges, tol=EDGE_OVERLAP_TOL, min_len=EDGE_OVERLAP_MIN_LEN,
     return out
 
 
+def _bbox_center(bb):
+    return ((bb[0] + bb[2]) / 2.0, (bb[1] + bb[3]) / 2.0)
+
+
+def _same_bbox(a, b, tol=CONTAINER_SAME_BBOX_TOL):
+    """Hai bbox trung nhau trong sai so tol (cung mot hinh ve hai lan)."""
+    return all(abs(float(a[i]) - float(b[i])) <= tol for i in range(4))
+
+
+def container_indices(shapes):
+    """Chi so cua nhung hinh la KHUNG BAO (chua hinh khac ben trong).
+
+    Nhan biet bang CAU TRUC chu khong bang dien tich: mot hinh la khung bao khi
+    TAM cua mot hinh khac nam trong long no. Dung nguong dien tich thi so do co
+    mot node don le rat to se bi coi oan la khung bao, va G8 se bao sai moi mui
+    ten cham vao node do.
+
+    Dung tam chu khong dung phan giao dien tich: hai block canh nhau co the
+    cham vien nhau do lam tron goc, nhung tam thi khong bao gio nam trong nhau.
+    """
+    out = set()
+    for i, big in enumerate(shapes):
+        if big.geom is None:
+            continue
+        for j, small in enumerate(shapes):
+            if i == j or small.geom is None:
+                continue
+            # Cung mot hinh ve hai lan (fill roi stroke) khong phai long nhau.
+            if _same_bbox(big.bbox, small.bbox):
+                continue
+            cx, cy = _bbox_center(small.bbox)
+            if (big.bbox[0] < cx < big.bbox[2]
+                    and big.bbox[1] < cy < big.bbox[3]):
+                out.add(i)
+                break
+    return out
+
+
+def _rect_sides(bb):
+    """Bon canh cua hinh chu nhat, kem ten canh de bao loi cho ro."""
+    x0, y0, x1, y1 = bb
+    return [
+        ("tren", ((x0, y0), (x1, y0))),
+        ("duoi", ((x0, y1), (x1, y1))),
+        ("trai", ((x0, y0), (x0, y1))),
+        ("phai", ((x1, y0), (x1, y1))),
+    ]
+
+
+def check_edge_border_run(edges, shapes, containers=None,
+                          tol=EDGE_BORDER_TOL, min_len=EDGE_BORDER_MIN_LEN,
+                          ignore_edges: "set | frozenset" = frozenset()):
+    """G8: mui ten chay DOC VIEN khung bao mot doan du dai.
+
+    Vi sao can mot check rieng, khong dung G1 hay G7:
+      * G1 chi bat mui ten XUYEN QUA than block. Mui ten ap sat vien thi phan
+        giao voi long block gan bang 0, nen G1 im lang.
+      * G7 chi so mui ten voi mui ten. Vien khung bao la block/boundary (co
+        fill), khong nam trong danh sach `edges`, nen G7 khong thay.
+
+    Loi that o cho: khi duong di trung voi vien khung nhom, mat nguoi doc mot
+    net duy nhat va khong the tach dau la ranh gioi nhom, dau la quan he. Do la
+    loi hay gap nhat khi dung \\node[fit=...] + thu vien `backgrounds`.
+
+    Chi xet KHUNG BAO, khong xet moi block. Mui ten di sat vien mot node thuong
+    la binh thuong (no vua roi khoi node do); nhung khung bao thi mui ten khong
+    co ly do gi de ap sat vien trong mot doan dai.
+    """
+    out = []
+    if containers is None:
+        containers = container_indices(shapes)
+    if not containers:
+        return out
+    for ei, e in enumerate(edges):
+        if ei in ignore_edges or not e.poly:
+            continue
+        segs = _segments(e.poly)
+        if not segs:
+            continue
+        for ci in sorted(containers):
+            frame = shapes[ci]
+            fx0, fy0, fx1, fy1 = frame.bbox
+            ex0, ey0, ex1, ey1 = e.bbox
+            # loc nhanh: edge phai cham vao vanh khung moi xet tiep
+            if (ex1 + tol < fx0 or fx1 + tol < ex0
+                    or ey1 + tol < fy0 or fy1 + tol < ey0):
+                continue
+            best = None
+            for side_name, side in _rect_sides(frame.bbox):
+                ang_side = _seg_angle_deg(*side)
+                for sa in segs:
+                    if not _angles_parallel(_seg_angle_deg(*sa), ang_side):
+                        continue
+                    try:
+                        ls_side = LineString(side)
+                        ls_edge = LineString(sa)
+                    except Exception:
+                        continue
+                    inter = ls_side.buffer(
+                        tol, cap_style=2).intersection(ls_edge)
+                    length = getattr(inter, "length", 0.0) or 0.0
+                    if length < min_len:
+                        continue
+                    if best is None or length > best[0]:
+                        mid = inter.interpolate(0.5, normalized=True)
+                        best = (length, side_name, sa, (_r(mid.x), _r(mid.y)))
+            if best is None:
+                continue
+            length, side_name, sa, mid = best
+            out.append(Finding(
+                "G8/edge-border-run", "error",
+                f"mui ten #{ei} chay doc vien {side_name} cua khung bao "
+                f"#{ci} {length:.1f}pt (cach <= {tol:g}pt) — khong tach duoc "
+                f"dau la vien nhom, dau la quan he",
+                {"edgeIndex": ei, "containerIndex": ci,
+                 "side": side_name,
+                 "segment": [list(sa[0]), list(sa[1])],
+                 "containerBbox": list(frame.bbox),
+                 "overlapLengthPt": _r(length),
+                 "tolerancePt": tol,
+                 "midPoint": list(mid),
+                 "bbox": [min(sa[0][0], sa[1][0]), min(sa[0][1], sa[1][1]),
+                          max(sa[0][0], sa[1][0]), max(sa[0][1], sa[1][1])]},
+                ["day duong ra xa vien khung bang via/channel",
+                 "noi rong khung bao (tang inner sep cua node fit)",
+                 "cho duong di ben trong khung thay vi ap sat vien"]))
+    return out
+
+
 def check_tiny_text(spans, min_font=MIN_FONT, base_font=None,
                     scale=1.0, kind="document", preset=None,
                     page_width=None):
@@ -1062,7 +1293,9 @@ def check_tiny_text(spans, min_font=MIN_FONT, base_font=None,
         #     (1in = 72bp); san doc duoc cua nha xuat ban tinh theo PRINTER
         #     POINT cua TeX (1in = 72.27pt). Bo qua buoc nay thi moi co chu
         #     nam DUNG tren nguong deu bao sai: 6.00 TeX pt hien thanh 5.98bp.
-        size_texpt = to_texpt(sp["size"])
+        # Chu bi quay 90 do (nhan truc doc): `size` do duoc la chieu day net,
+        # khong phai co chu. Phai lay co chu THAT tu bbox/matrix.
+        size_texpt = to_texpt(real_font_size(sp))
         effective = size_texpt * scale
         if effective >= floor - FONT_EPS:
             continue
@@ -1316,8 +1549,18 @@ def analyze(pdf_path, page_no=0, min_font=MIN_FONT, eps=ENDPOINT_EPS,
     regions = (figure_regions(blocks, boundaries, edges)
                if kind == "document" else NO_FILTER)
 
+    # Khung bao phai duoc xac dinh TRUOC G1: mui ten noi hai node cung nhom di
+    # qua long khung la hop le, nen G1 phai bo qua khung. `shapes` gop ca
+    # boundary vi khung nhom co the ve net dut.
+    shapes = blocks + boundaries
+    containers = container_indices(shapes)
+    # Chi so trong `shapes` khop voi `blocks` o phan dau (shapes = blocks +
+    # boundaries), nen loc lay rieng khung bao thuoc `blocks` cho G1.
+    block_containers = {i for i in containers if i < len(blocks)}
+
     findings = []
-    findings += check_edge_through_block(edges, blocks, eps=eps)
+    findings += check_edge_through_block(edges, blocks, eps=eps,
+                                        ignore_blocks=block_containers)
     findings += check_label_block(spans, blocks, regions=regions)
     findings += check_label_label(spans, regions=regions)
     findings += check_bounds(page_holder, blocks + boundaries + edges, spans,
@@ -1329,11 +1572,17 @@ def analyze(pdf_path, page_no=0, min_font=MIN_FONT, eps=ENDPOINT_EPS,
     findings += check_label_edge(spans, edges, masks, regions=regions,
                                  ignore_edges=rule_edges)
     findings += check_edge_edge(edges, ignore_edges=rule_edges)
+    # G8 dung lai `shapes`/`containers` da tinh o tren (khung nhom co the ve
+    # net lien -> block, hoac net dut -> boundary; ca hai deu la vien ma mui
+    # ten co the hoa vao).
+    findings += check_edge_border_run(edges, shapes, containers=containers,
+                                      ignore_edges=rule_edges)
 
     inventory = {
         "blocks": len(blocks), "boundaries": len(boundaries),
         "edges": len(edges), "arrowheads": len(heads),
         "masks": len(masks), "labels": len(spans),
+        "containers": len(containers),
         "ruleEdges": len(rule_edges), "diagramEdges": len(edges) - len(rule_edges),
         "pageWidthPt": _r(pr.width), "pageHeightPt": _r(pr.height),
         "pageKind": kind, "pagePreset": preset, "scale": scale,
