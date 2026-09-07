@@ -41,7 +41,7 @@ Tuỳ chọn: `--min-font 6` (sàn chữ, pt), `--scale 0.46` (hệ số `\resiz
 
 Gate tự nhận khổ trang: `pageKind=document` (khớp A4/letter/beamer → font đo được là font thật) hoặc `pageKind=standalone` (hình crop rời → cần `--scale` mới kết luận được về font).
 
-## Sáu nhóm check
+## Tám nhóm check
 
 | Mã | Bắt gì |
 |---|---|
@@ -52,6 +52,7 @@ Gate tự nhận khổ trang: `pageKind=document` (khớp A4/letter/beamer → f
 | `G5/tiny-text` | chữ nhỏ hơn sàn (bắt được chữ teo do `\resizebox`) |
 | `G6/label-edge-clash` | nhãn bị đường đi xuyên qua, không có mask che |
 | `G7/edge-edge-overlap` | hai mũi tên chạy trùng/song song sát nhau trên đoạn dài |
+| `G8/edge-border-run` | mũi tên chạy dọc viền khung bao (`\node[fit=…]`), hoà vào viền nhóm |
 
 ## Nguyên lý G1 (quan trọng nhất)
 
@@ -60,6 +61,14 @@ PDF không giữ ID node, nên không biết mũi tên nào *thuộc về* block
 > Mũi tên được phép giao vùng trong của block **chỉ khi** điểm giao nằm trong bán kính `eps` của một trong hai đầu mút. Mọi giao ở giữa thân mũi tên là **lỗi**.
 
 Vì mũi tên hợp lệ luôn bắt đầu/kết thúc ở *viền* block, còn mũi tên đè sai luôn cắt *ngang thân*. Nhờ vậy không cần trích metadata từ `.tex`.
+
+### Ngoại lệ bắt buộc: khung bao
+
+Heuristic trên **sai** với khung nhóm (`\node[fit=…]` + thư viện `backgrounds`). Đường nối hai node *nằm trong cùng một nhóm* buộc phải đi qua lòng khung, nên G1 đọc phần giao đó thành "xuyên qua block" và báo lỗi trên mọi sơ đồ dùng `fit`. Đo bằng số thật trên `fixtures/border-run.pdf` trước khi sửa: edge `[(64.6, 253.6) → (81.8, 253.6)]` bị báo xuyên block #10 17.2pt, mà block #10 chính là khung bao.
+
+`container_indices()` nhận diện khung bao bằng **cấu trúc**: một hình là khung bao khi *tâm* của hình khác nằm trong lòng nó. Không dùng ngưỡng diện tích — sơ đồ có một node đơn lẻ rất to sẽ bị coi oan là khung bao, và G8 sẽ báo sai mọi mũi tên chạm vào node đó. Không dùng phần giao diện tích — hai block cạnh nhau có thể chạm viền nhau do làm tròn góc, nhưng tâm thì không bao giờ nằm trong nhau.
+
+Khung bao có check riêng là **G8**, đúng bản chất hơn: vấn đề của khung nhóm không phải bị xuyên qua, mà là *bị hoà vào viền*.
 
 ## Phân loại phần tử từ PDF
 

@@ -897,5 +897,187 @@ class TestMathExtensionFontExempt(unittest.TestCase):
         self.assertEqual(out, [], "glyph CMEX: co chu la tham so scale")
 
 
+class TestContainerDetection(unittest.TestCase):
+    """Nhan biet KHUNG BAO bang cau truc (chua tam hinh khac), khong bang dien tich.
+
+    Dung nguong dien tich la sai: mot so do co the co mot node don le rat to
+    (vi du block 'Ket luan' chiem ca hang), va no khong phai khung bao.
+    """
+
+    def test_frame_containing_two_blocks_is_container(self):
+        inner_a = mk_block(20, 20, 80, 50)
+        inner_b = mk_block(100, 20, 160, 50)
+        frame = mk_block(10, 10, 170, 60)
+        got = G.container_indices([inner_a, inner_b, frame])
+        self.assertEqual(got, {2}, "chi khung ngoai la container")
+
+    def test_two_sibling_blocks_are_not_containers(self):
+        """REGRESSION: hai block canh nhau khong long nhau."""
+        a = mk_block(20, 20, 80, 50)
+        b = mk_block(100, 20, 160, 50)
+        self.assertEqual(G.container_indices([a, b]), set())
+
+    def test_large_lone_block_is_not_container(self):
+        """Mot block to nhung khong chua gi -> KHONG phai khung bao."""
+        big = mk_block(10, 10, 400, 200)
+        far = mk_block(500, 300, 560, 330)
+        self.assertEqual(G.container_indices([big, far]), set())
+
+    def test_same_shape_drawn_twice_is_not_container(self):
+        """Fill roi stroke cung mot hinh -> bbox trung, khong phai long nhau."""
+        a = mk_block(10, 10, 170, 60)
+        b = mk_block(10.5, 10.5, 169.5, 59.5)
+        self.assertEqual(G.container_indices([a, b]), set())
+
+
+class TestG8EdgeBorderRun(unittest.TestCase):
+    """G8: mui ten chay DOC VIEN khung bao -> hoa vao vien, khong tach duoc.
+
+    G1 khong bat duoc (mui ten khong xuyen than khung), G7 khong bat duoc
+    (vien khung la block, khong nam trong danh sach edges).
+    """
+
+    def setUp(self):
+        # khung bao 10..170 x 10..60, chua hai block con
+        self.inner_a = mk_block(20, 20, 80, 50)
+        self.inner_b = mk_block(100, 20, 160, 50)
+        self.frame = mk_block(10, 10, 170, 60)
+        self.shapes = [self.inner_a, self.inner_b, self.frame]
+
+    def test_runs_along_top_border_is_error(self):
+        e = mk_edge([(30, 10.5), (150, 10.5)])
+        out = G.check_edge_border_run([e], self.shapes)
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0].code, "G8/edge-border-run")
+        self.assertEqual(out[0].evidence["side"], "tren")
+        self.assertGreater(out[0].evidence["overlapLengthPt"], 100)
+
+    def test_runs_along_left_border_is_error(self):
+        e = mk_edge([(10.8, 15), (10.8, 55)])
+        out = G.check_edge_border_run([e], self.shapes)
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0].evidence["side"], "trai")
+
+    def test_edge_inside_frame_is_ok(self):
+        """REGRESSION: duong noi hai node cung nhom di trong long khung -> HOP LE."""
+        e = mk_edge([(80, 35), (100, 35)])
+        self.assertEqual(G.check_edge_border_run([e], self.shapes), [])
+
+    def test_edge_far_outside_is_ok(self):
+        e = mk_edge([(30, 200), (150, 200)])
+        self.assertEqual(G.check_edge_border_run([e], self.shapes), [])
+
+    def test_short_touch_below_threshold_is_ok(self):
+        """Cham vien mot doan ngan (duong vua roi khoi khung) -> khong phai loi."""
+        e = mk_edge([(30, 10.5), (38, 10.5)])
+        self.assertEqual(G.check_edge_border_run([e], self.shapes), [])
+
+    def test_perpendicular_crossing_border_is_ok(self):
+        """Duong CAT vuong goc qua vien la binh thuong, khong phai chay doc."""
+        e = mk_edge([(90, 0), (90, 100)])
+        self.assertEqual(G.check_edge_border_run([e], self.shapes), [])
+
+    def test_no_container_means_no_finding(self):
+        """Khong co khung bao thi G8 khong co gi de xet."""
+        e = mk_edge([(30, 10.5), (150, 10.5)])
+        out = G.check_edge_border_run([e], [self.inner_a, self.inner_b])
+        self.assertEqual(out, [])
+
+    def test_ignore_edges_is_respected(self):
+        e = mk_edge([(30, 10.5), (150, 10.5)])
+        out = G.check_edge_border_run([e], self.shapes, ignore_edges={0})
+        self.assertEqual(out, [])
+
+
+class TestG1IgnoresContainers(unittest.TestCase):
+    """REGRESSION do bang so that tren fixture border-run.pdf.
+
+    Mui ten noi hai node NAM TRONG cung mot khung nhom bat buoc phai di qua
+    LONG khung do. G1 doc phan giao ay thanh "xuyen qua block" va bao loi tren
+    MOI so do dung fit+backgrounds. Do that truoc khi sua: edge
+    [(64.6, 253.6) -> (81.8, 253.6)] bi bao xuyen block #10 17.2pt, ma block
+    #10 chinh la khung bao.
+    """
+
+    def setUp(self):
+        self.inner_a = mk_block(20, 20, 80, 50)
+        self.inner_b = mk_block(100, 20, 160, 50)
+        self.frame = mk_block(10, 10, 170, 60)
+        self.blocks = [self.inner_a, self.inner_b, self.frame]
+
+    def test_edge_crossing_container_body_is_not_g1(self):
+        e = mk_edge([(80, 35), (100, 35)])
+        out = G.check_edge_through_block([e], self.blocks, ignore_blocks={2})
+        self.assertEqual(out, [], "di qua long khung nhom khong phai loi G1")
+
+    def test_edge_through_ordinary_block_still_flagged(self):
+        """Bo qua khung bao KHONG duoc lam mat kha nang bat loi that."""
+        e = mk_edge([(0, 35), (200, 35)])
+        out = G.check_edge_through_block([e], self.blocks, ignore_blocks={2})
+        codes = [f.code for f in out]
+        self.assertTrue(codes, "van phai bat mui ten xuyen block thuong")
+        self.assertTrue(all(c == "G1/edge-through-block" for c in codes))
+        hit = {f.evidence["blockIndex"] for f in out}
+        self.assertNotIn(2, hit, "khung bao khong duoc bao")
+
+
+class TestG8RealFixture(unittest.TestCase):
+    """G8 tren PDF that: bat 2 ca chay doc vien, khong bao ca di trong long."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.pdf = build_fixture("border-run.tex")
+
+    def test_catches_two_border_runs(self):
+        findings, inv, _ = G.analyze(str(self.pdf))
+        g8 = [f for f in findings if f.code == "G8/edge-border-run"]
+        self.assertEqual(len(g8), 2, "phai bat dung 2 ca chay doc vien")
+        self.assertEqual(inv["containers"], 3, "3 khung nhom trong fixture")
+        for f in g8:
+            self.assertGreater(f.evidence["overlapLengthPt"],
+                               G.EDGE_BORDER_MIN_LEN)
+
+    def test_no_g1_false_positive_on_container(self):
+        """Ca 3 cua fixture von HOP LE: khong duoc sinh loi G1 nao."""
+        findings, _, _ = G.analyze(str(self.pdf))
+        g1 = [f for f in findings if f.code == "G1/edge-through-block"]
+        self.assertEqual(g1, [], "khung nhom khong duoc bao G1")
+
+
+class TestRot90FlagIsWired(unittest.TestCase):
+    """REGRESSION: co `rot90` tung la CO CHET.
+
+    `real_font_size()` doc `span["rot90"]`, nhung khong backend nao set co do,
+    nen ban va G5 cho nhan truc doc hoan toan vo hieu. Test nay canh viec ca
+    hai backend deu phai dat khoa `rot90` vao moi span.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.pdf = build_fixture("bad.tex")
+
+    def test_every_span_has_rot90_key(self):
+        page, holder, close = G._open_page(str(self.pdf), 0)
+        try:
+            spans = G.text_spans(page)
+        finally:
+            close()
+        self.assertTrue(spans, "fixture phai co nhan")
+        missing = [s["text"] for s in spans if "rot90" not in s]
+        self.assertEqual(missing, [], "moi span phai co khoa rot90")
+
+    def test_real_font_size_uses_bbox_when_rotated(self):
+        """Chu quay 90 do: co chu that lay tu be ngang bbox, khong tu `size`."""
+        sp = mk_span("l", 507.8, 481.2, 515.6, 483.4, size=2.18)
+        self.assertAlmostEqual(G.real_font_size(sp), 2.18, places=2)
+        sp["rot90"] = True
+        self.assertAlmostEqual(G.real_font_size(sp), 7.8, places=1)
+
+    def test_horizontal_span_unchanged(self):
+        sp = mk_span("abc", 100, 100, 130, 110, size=10.0)
+        sp["rot90"] = False
+        self.assertAlmostEqual(G.real_font_size(sp), 10.0, places=6)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
